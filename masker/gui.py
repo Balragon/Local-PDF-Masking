@@ -49,7 +49,6 @@ from PySide6.QtWidgets import (
 
 from masker import theme
 from masker.core import Region, display_to_page, page_to_display, redact_pdf
-from masker.detect import PATTERNS, Detection, detect_document
 
 APP_NAME = "PDF Masker"
 ZOOM_STEPS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0]
@@ -66,23 +65,19 @@ class PageCanvas(QLabel):
         self._start: QPoint | None = None
         self._current: QPoint | None = None
         self._regions: list[QRect] = []
-        self._candidates: list[QRect] = []
         self._selected = -1
         self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.setCursor(Qt.CursorShape.CrossCursor)
 
-    def set_content(self, pixmap: QPixmap, regions: list[QRect], selected: int,
-                    candidates: list[QRect] | None = None) -> None:
+    def set_content(self, pixmap: QPixmap, regions: list[QRect], selected: int) -> None:
         self._regions = regions
-        self._candidates = candidates or []
         self._selected = selected
         self.setPixmap(pixmap)
         self.setFixedSize(pixmap.size())
         self.update()
 
-    def set_overlays(self, regions: list[QRect], selected: int, candidates: list[QRect] | None = None) -> None:
+    def set_overlays(self, regions: list[QRect], selected: int) -> None:
         self._regions = regions
-        self._candidates = candidates or []
         self._selected = selected
         self.update()
 
@@ -119,10 +114,6 @@ class PageCanvas(QLabel):
         t = theme.tokens()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        for r in self._candidates:  # 자동 탐지 후보: 주황 점선
-            painter.setPen(QPen(QColor("#f59e0b"), 2, Qt.PenStyle.DashLine))
-            painter.setBrush(theme.qcolor("#f59e0b", 50))
-            painter.drawRect(r)
         for i, r in enumerate(self._regions):  # 확정 영역: 저장 결과와 같은 불투명 검정
             selected = i == self._selected
             painter.setPen(QPen(QColor(t["accent"]) if selected else QColor(t["mask"]), 2))
@@ -151,7 +142,6 @@ class MainWindow(QMainWindow):
         self._fit_width = True
         # 영역은 회전 전 PDF 포인트 좌표로 보관 -> 확대/축소·페이지 회전과 무관
         self.regions: dict[int, list[Region]] = {}
-        self.candidates: list[Detection] = []
         self._thumb_cache: dict[int, QPixmap] = {}
 
         self._build_ui()
@@ -199,26 +189,6 @@ class MainWindow(QMainWindow):
         self.btn_del.clicked.connect(self._delete_selected)
         self.btn_clear.clicked.connect(self._clear_page)
 
-        self.kind_checks: dict[str, QCheckBox] = {}
-        kinds_row = QHBoxLayout()
-        kinds_row.setSpacing(10)
-        for kind in PATTERNS:
-            cb = QCheckBox(kind)
-            cb.setChecked(True)
-            self.kind_checks[kind] = cb
-            kinds_row.addWidget(cb)
-        kinds_row.addStretch(1)
-        self.btn_detect = QPushButton("문서 전체에서 찾기")
-        self.btn_detect.clicked.connect(self._run_detect)
-        self.candidate_list = QListWidget()
-        self.candidate_list.itemChanged.connect(lambda _: self._refresh_canvas_overlays())
-        self.candidate_list.currentRowChanged.connect(self._on_candidate_selected)
-        self.btn_add_candidates = QPushButton("체크한 항목을 마스킹 영역으로 추가")
-        self.btn_add_candidates.setObjectName("primary")
-        self.btn_add_candidates.clicked.connect(self._add_checked_candidates)
-        self.btn_clear_candidates = QPushButton("후보 지우기")
-        self.btn_clear_candidates.clicked.connect(self._clear_candidates)
-
         self.rasterize = QCheckBox("모든 페이지를 이미지로 변환 (가장 안전, 텍스트 검색 불가)")
         self.btn_save = QPushButton("마스킹 적용 후 저장…")
         self.btn_save.setObjectName("primary")
@@ -233,15 +203,6 @@ class MainWindow(QMainWindow):
         row.addWidget(self.btn_del)
         row.addWidget(self.btn_clear)
         side.addLayout(row)
-        side.addSpacing(6)
-        side.addWidget(self._heading("자동 탐지"))
-        side.addLayout(kinds_row)
-        side.addWidget(self.btn_detect)
-        side.addWidget(self.candidate_list, 2)
-        row2 = QHBoxLayout()
-        row2.addWidget(self.btn_add_candidates, 1)
-        row2.addWidget(self.btn_clear_candidates)
-        side.addLayout(row2)
         side.addSpacing(6)
         side.addWidget(self._heading("저장"))
         side.addWidget(self.rasterize)
@@ -317,7 +278,6 @@ class MainWindow(QMainWindow):
         self.act_zoom_in = act("확대", lambda: self._zoom_step(+1), QKeySequence.StandardKey.ZoomIn)
         self.act_zoom_out = act("축소", lambda: self._zoom_step(-1), QKeySequence.StandardKey.ZoomOut)
         self.act_fit = act("폭 맞춤", self._fit_to_width, QKeySequence("Ctrl+0"))
-        self.act_detect = act("자동 탐지", self._run_detect, QKeySequence("Ctrl+F"))
         self.act_delete = act("영역 삭제", self._delete_selected, QKeySequence(Qt.Key.Key_Delete))
         self.act_quit = act("종료", self.close, QKeySequence.StandardKey.Quit)
         self.addAction(self.act_delete)
@@ -341,8 +301,6 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.zoom_label)
         tb.addAction(self.act_zoom_in)
         tb.addAction(self.act_fit)
-        tb.addSeparator()
-        tb.addAction(self.act_detect)
         spacer = QWidget()
         spacer.setSizePolicy(spacer.sizePolicy().horizontalPolicy().Expanding, spacer.sizePolicy().verticalPolicy())
         tb.addWidget(spacer)
@@ -358,8 +316,7 @@ class MainWindow(QMainWindow):
         m = self.menuBar().addMenu("보기")
         for a in (self.act_zoom_in, self.act_zoom_out, self.act_fit, self.act_prev, self.act_next):
             m.addAction(a)
-        m = self.menuBar().addMenu("도구")
-        m.addAction(self.act_detect)
+        m = self.menuBar().addMenu("편집")
         m.addAction(self.act_delete)
 
     def _apply_theme(self) -> None:
@@ -374,10 +331,7 @@ class MainWindow(QMainWindow):
         self.act_zoom_in.setIcon(theme.icon("zoom_in", c))
         self.act_zoom_out.setIcon(theme.icon("zoom_out", c))
         self.act_fit.setIcon(theme.icon("fit", c))
-        self.act_detect.setIcon(theme.icon("scan", c))
         self.btn_del.setIcon(theme.icon("trash", t["danger"], 16))
-        self.btn_detect.setIcon(theme.icon("scan", c, 16))
-        self.btn_add_candidates.setIcon(theme.icon("plus", t["accent_fg"], 16))
         self.btn_save.setIcon(theme.icon("shield", t["accent_fg"], 16))
         self.welcome_icon.setPixmap(theme.icon("shield", t["accent"], 56).pixmap(56, 56))
         self.canvas.update()
@@ -433,16 +387,14 @@ class MainWindow(QMainWindow):
         self.pdf_path = Path(path)
         self.password = password
         self.regions = {}
-        self.candidates = []
         self._thumb_cache = {}
         self.page_index = 0
-        self.candidate_list.clear()
         self.center.setCurrentWidget(self.scroll)
         self.setWindowTitle(f"{self.pdf_path.name} — {APP_NAME}")
         self._populate_thumbs()
         self._fit_width = True
         self._fit_to_width()
-        self.status_left.setText(f"{self.pdf_path.name} · {doc.page_count}쪽 · 드래그로 가릴 영역을 지정하세요")
+        self.status_left.setText(f"{self.pdf_path.name} · {doc.page_count}쪽 · 드래그로 가릴 영역을 지정하세요 · 클릭으로 선택, Delete로 삭제")
 
     def _render_pixmap(self, zoom: float) -> QPixmap:
         assert self.pdf is not None
@@ -499,24 +451,11 @@ class MainWindow(QMainWindow):
             out.append(QRect(round(x0), round(y0), round(x1 - x0), round(y1 - y0)))
         return out
 
-    def _page_candidates_display(self) -> list[QRect]:
-        assert self.pdf is not None
-        page = self.pdf[self.page_index]
-        out = []
-        for i, d in enumerate(self.candidates):
-            item = self.candidate_list.item(i)
-            if d.page != self.page_index or item is None or item.checkState() != Qt.CheckState.Checked:
-                continue
-            x0, y0, x1, y1 = page_to_display(page, d.region, self.zoom)
-            out.append(QRect(round(x0), round(y0), round(x1 - x0), round(y1 - y0)))
-        return out
-
     def _show_page(self, selected: int = -1) -> None:
         if self.pdf is None:
             self._update_controls()
             return
-        self.canvas.set_content(self._render_pixmap(self.zoom), self._page_regions_display(), selected,
-                                self._page_candidates_display())
+        self.canvas.set_content(self._render_pixmap(self.zoom), self._page_regions_display(), selected)
         self._refresh_list(selected)
         self.page_label.setText(f"{self.page_index + 1} / {self.pdf.page_count}")
         self.zoom_label.setText(f"{round(self.zoom * 100)}%")
@@ -530,7 +469,7 @@ class MainWindow(QMainWindow):
         if self.pdf is None:
             return
         sel = self.region_list.currentRow() if selected is None else selected
-        self.canvas.set_overlays(self._page_regions_display(), sel, self._page_candidates_display())
+        self.canvas.set_overlays(self._page_regions_display(), sel)
 
     def _refresh_list(self, selected: int = -1) -> None:
         self.region_list.blockSignals(True)
@@ -619,71 +558,6 @@ class MainWindow(QMainWindow):
         self._refresh_thumb(self.page_index)
         self._update_controls()
 
-    # ---------- 자동 탐지 ----------
-    def _run_detect(self) -> None:
-        if self.pdf is None:
-            return
-        kinds = {k for k, cb in self.kind_checks.items() if cb.isChecked()}
-        if not kinds:
-            QMessageBox.information(self, "자동 탐지", "찾을 종류를 하나 이상 선택하세요.")
-            return
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            self.candidates = detect_document(self.pdf, kinds)
-        finally:
-            QApplication.restoreOverrideCursor()
-        self.candidate_list.blockSignals(True)
-        self.candidate_list.clear()
-        for d in self.candidates:
-            item = QListWidgetItem(f"p.{d.page + 1}  [{d.kind}]  {d.text}")
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked)
-            self.candidate_list.addItem(item)
-        self.candidate_list.blockSignals(False)
-        self._refresh_canvas_overlays()
-        self._update_controls()
-        n = len(self.candidates)
-        self.status_left.setText(
-            f"자동 탐지: {n}건 발견 — 목록에서 확인 후 추가하세요" if n else
-            "자동 탐지: 해당 패턴을 찾지 못했습니다 (스캔본은 글자 인식이 필요합니다)"
-        )
-
-    def _on_candidate_selected(self, row: int) -> None:
-        if 0 <= row < len(self.candidates):
-            d = self.candidates[row]
-            if d.page != self.page_index:
-                self._go_page(d.page)
-
-    def _add_checked_candidates(self) -> None:
-        added = 0
-        keep: list[Detection] = []
-        for i, d in enumerate(self.candidates):
-            item = self.candidate_list.item(i)
-            if item is not None and item.checkState() == Qt.CheckState.Checked:
-                self.regions.setdefault(d.page, []).append(d.region)
-                added += 1
-            else:
-                keep.append(d)
-        self.candidates = keep
-        self.candidate_list.blockSignals(True)
-        self.candidate_list.clear()
-        for d in keep:
-            item = QListWidgetItem(f"p.{d.page + 1}  [{d.kind}]  {d.text}")
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Unchecked)
-            self.candidate_list.addItem(item)
-        self.candidate_list.blockSignals(False)
-        for i in range(self.thumbs.count()):
-            self._refresh_thumb(i)
-        self._show_page()
-        self.status_left.setText(f"{added}개 영역을 추가했습니다.")
-
-    def _clear_candidates(self) -> None:
-        self.candidates = []
-        self.candidate_list.clear()
-        self._refresh_canvas_overlays()
-        self._update_controls()
-
     # ---------- 저장 ----------
     def _total_regions(self) -> int:
         return sum(len(v) for v in self.regions.values())
@@ -731,13 +605,10 @@ class MainWindow(QMainWindow):
         n = self.pdf.page_count if has else 0
         self.act_prev.setEnabled(has and self.page_index > 0)
         self.act_next.setEnabled(has and self.page_index < n - 1)
-        for a in (self.act_save, self.act_zoom_in, self.act_zoom_out, self.act_fit, self.act_detect):
+        for a in (self.act_save, self.act_zoom_in, self.act_zoom_out, self.act_fit):
             a.setEnabled(has)
         self.btn_del.setEnabled(has and bool(self.regions.get(self.page_index)))
         self.btn_clear.setEnabled(has and bool(self.regions.get(self.page_index)))
-        self.btn_detect.setEnabled(has)
-        self.btn_add_candidates.setEnabled(has and bool(self.candidates))
-        self.btn_clear_candidates.setEnabled(has and bool(self.candidates))
         self.btn_save.setEnabled(has and self._total_regions() > 0)
         self.rasterize.setEnabled(has)
         total = self._total_regions()
