@@ -1,0 +1,10 @@
+.venv/
+.venv-build/
+__pycache__/
+.pytest_cache/
+*.pyc
+build/
+dist/
+out/
+masker/assets/icon.icns
+masker/assets/icon.iconset/
