@@ -26,8 +26,7 @@ GitHub Actions가 자동으로 빌드합니다. 저장소의 **Actions** 탭 →
 | 파일 | 대상 |
 | --- | --- |
 | `PDF-Masker-windows.exe` | Windows 10/11 (64비트) — 설치 없이 바로 실행 |
-| `PDF-Masker-macos-arm64.dmg` | Apple Silicon Mac (M1 이후) |
-| `PDF-Masker-macos-intel.dmg` | Intel Mac (2020년 이전 모델) — 기본 빌드에서 제외. Actions → Run workflow → "Intel Mac 빌드도 포함" 체크 시 생성 |
+| `PDF-Masker-macos-arm64.dmg` | Mac (Apple Silicon, M1 이후) |
 
 > **처음 실행 시 경고가 뜨는 이유**
 > 개발자 서명 인증서(Apple $99/년, Windows 코드사인)를 쓰지 않아 OS가 "확인되지 않은 앱"으로 경고합니다.

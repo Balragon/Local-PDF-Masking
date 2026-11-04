@@ -6,11 +6,6 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
-    inputs:
-      build_intel:
-        description: "Intel Mac 빌드도 포함 (러너 수급이 적어 오래 걸릴 수 있음)"
-        type: boolean
-        default: false
 
 jobs:
   test:
@@ -69,32 +64,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: PDF-Masker-${{ matrix.name }}
-          path: out/*
-
-  # Intel Mac 은 GitHub 러너 공급이 매우 적어 기본 빌드에서 제외.
-  # Actions 탭 → Run workflow → "Intel Mac 빌드도 포함" 체크 시 빌드됨.
-  build-intel:
-    if: github.event_name == 'workflow_dispatch' && inputs.build_intel
-    needs: test
-    runs-on: macos-15-intel
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -r requirements.txt pyinstaller pillow
-      - run: python scripts/make_icns.py
-      - run: pyinstaller --noconfirm --clean pdfmasker.spec
-      - run: |
-          mkdir -p out dmgroot
-          codesign --force --deep --sign - "dist/PDF Masker.app"
-          cp -R "dist/PDF Masker.app" dmgroot/
-          ln -s /Applications dmgroot/Applications
-          hdiutil create -volname "PDF Masker" -srcfolder dmgroot -ov -format UDZO out/PDF-Masker-macos-intel.dmg
-      - uses: actions/upload-artifact@v4
-        with:
-          name: PDF-Masker-macos-intel
           path: out/*
 
   release:
