@@ -267,9 +267,12 @@ class MainWindow(QMainWindow):
         self.template = QPlainTextEdit()
         self.template.setFont(self._mono())
         self.template.setPlaceholderText(
-            "원하는 양식을 글로 적으세요. 엑셀의 한 행마다 이 글이 반복됩니다.\n\n"
-            "예)  {이름}님 ({부서}) - {금액|comma}원\n"
-            "예)  {1}, {2}, {3}\n\n"
+            "원하는 양식을 그대로 적으세요. { } 가 든 줄만 엑셀 행마다 반복되고\n"
+            "나머지 줄은 한 번만 나옵니다.\n\n"
+            "예)\n"
+            "11/5일 입고요청\n"
+            "{품명} {규격} {수량}개\n"
+            "오전입고 바랍니다.\n\n"
             "{열이름} 또는 {1} {2} 로 셀 값을 넣습니다. 자세한 것은 F1.")
         self.template.textChanged.connect(self._on_spec_changed)
         self.template_warn = QLabel("")

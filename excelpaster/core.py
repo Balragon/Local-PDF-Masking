@@ -7,6 +7,7 @@ import io
 import json
 import re
 from dataclasses import asdict, dataclass, replace
+from datetime import date
 
 Table = list[list[str]]
 
@@ -14,6 +15,7 @@ Table = list[list[str]]
 ROW_NUMBER_KEYS = ("#", "행번호", "n", "row")
 ROW_COUNT_KEYS = ("행수", "rows", "count")
 COL_COUNT_KEYS = ("열수", "cols")
+TODAY_KEYS = ("오늘", "today")
 
 
 @dataclass
@@ -149,7 +151,7 @@ def unknown_placeholders(template: str, headers: list[str]) -> list[str]:
 
 def _is_special(name: str) -> bool:
     k = name.lower()
-    return k in ROW_NUMBER_KEYS or k in ROW_COUNT_KEYS or k in COL_COUNT_KEYS
+    return k in ROW_NUMBER_KEYS or k in ROW_COUNT_KEYS or k in COL_COUNT_KEYS or k in TODAY_KEYS
 
 
 def _build_lookup(headers: list[str]) -> dict[str, int]:
@@ -221,13 +223,23 @@ def _apply_filter(value: str, spec: str) -> str:
     raise TemplateError(f"알 수 없는 필터: {name}")
 
 
+def _today() -> str:
+    d = date.today()
+    return f"{d.month}/{d.day}"
+
+
 def render_template(template: str, headers: list[str], row: list[str],
                     row_number: int, row_count: int) -> str:
+    """자리표시자를 채운다. 값이 빈 셀이면 양옆 공백 중 하나를 같이 지워 공백이 겹치지 않게 한다."""
     lookup = _build_lookup(headers)
     width = len(headers)
     out: list[str] = []
+    eat_space = False  # 직전 자리표시자가 빈 값이었고 앞쪽 공백을 못 지운 경우 → 다음 글의 앞 공백 하나 제거
     for is_field, inner in _scan(template):
         if not is_field:
+            if eat_space and inner.startswith(" "):
+                inner = inner[1:]
+            eat_space = False
             out.append(inner)
             continue
         parts = inner.split("|")
@@ -241,37 +253,84 @@ def render_template(template: str, headers: list[str], row: list[str],
             value = str(row_count)
         elif name.lower() in COL_COUNT_KEYS:
             value = str(width)
+        elif name.lower() in TODAY_KEYS:
+            value = _today()
         else:
+            eat_space = False
             out.append("{" + inner + "}")  # 모르는 이름은 그대로 둠 (타이핑 중 깨지지 않도록)
             continue
         for f in parts[1:]:
             if f.strip():
                 value = _apply_filter(value, f)
+        if value == "":
+            prev = out[-1] if out else ""
+            so_far = "".join(out).rstrip(" ")
+            at_line_start = so_far == "" or so_far.endswith("\n")
+            if not at_line_start and prev.endswith(" "):
+                out[-1] = prev[:-1]   # 앞 공백 하나 제거
+            else:
+                eat_space = True      # 줄 머리(들여쓰기)는 두고 뒤 공백 하나 제거
+            continue
+        eat_space = False
         out.append(value)
     return "".join(out)
+
+
+def _is_row_line(line: str) -> bool:
+    """셀 값이나 행 번호를 참조하는 줄인가. {오늘} {행수} 처럼 행과 무관한 것만 있으면 머리말/꼬리말."""
+    global_keys = TODAY_KEYS + ROW_COUNT_KEYS + COL_COUNT_KEYS
+    return any(name.lower() not in global_keys for name in placeholders(line))
+
+
+def split_template(template: str) -> tuple[str, str, str]:
+    """템플릿을 (머리말, 행마다 반복할 부분, 꼬리말) 로 나눈다.
+
+    자리표시자가 든 첫 줄부터 마지막 줄까지가 반복 부분이고, 그 앞뒤 줄은 한 번만 나온다.
+    자리표시자가 한 줄도 없으면 전체가 반복 부분이다. 꼬리말이 없을 때 끝의 빈 줄은 반복 부분에
+    들어가 행 사이를 띄우고, 꼬리말이 있으면 그 빈 줄은 꼬리말 앞의 간격이 된다.
+    """
+    lines = template.replace("\r\n", "\n").split("\n")
+    marked = [i for i, ln in enumerate(lines) if _is_row_line(ln)]
+    if not marked:
+        return "", template, ""
+    first, last = marked[0], marked[-1]
+    if not any(ln.strip() for ln in lines[last + 1:]):
+        last = len(lines) - 1  # 꼬리말이 없으면 끝의 빈 줄은 반복 부분에 포함 (행 사이 띄우기)
+    head = "\n".join(lines[:first])
+    body = "\n".join(lines[first:last + 1])
+    tail = "\n".join(lines[last + 1:])
+    return head, body, tail
 
 
 # ---------------------------------------------------------------- 렌더링
 
 def render(table: Table, spec: FormatSpec) -> str:
-    """템플릿을 행마다 적용해 줄바꿈으로 이어 붙인 텍스트. 템플릿 오류는 TemplateError.
+    """템플릿을 표에 적용한 텍스트. 템플릿 오류는 TemplateError.
 
-    템플릿이 여러 줄이면 그 여러 줄이 행마다 반복된다. 템플릿 끝에 빈 줄을 두면 행 사이가 한 줄 띄어진다.
+    { } 가 든 줄들은 행마다 반복되어 줄바꿈으로 이어지고, 그 앞뒤 줄(머리말·꼬리말)은 한 번만 나온다.
     """
     headers, data = split_table(table, spec.header_row, spec.skip_blank_rows)
     if not headers:
         return ""
     n = len(data)
-    template = spec.template.replace("\r\n", "\n")
-    return "\n".join(render_template(template, headers, r, i + 1, n) for i, r in enumerate(data))
+    head, body, tail = split_template(spec.template)
+    meta = [""] * len(headers)
+    parts = []
+    if head:
+        parts.append(render_template(head, headers, meta, 0, n))
+    parts.extend(render_template(body, headers, r, i + 1, n) for i, r in enumerate(data))
+    if tail:
+        parts.append(render_template(tail, headers, meta, 0, n))
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------- 프리셋
 
 BUILTIN_PRESETS: list[FormatSpec] = [
+    FormatSpec(name="입고요청 예시 (머리말·꼬리말)",
+               template="{오늘}일 입고요청\n{1} {2} {3}개\n오전입고 바랍니다."),
     FormatSpec(name="열을 쉼표로 이어서 한 줄씩", template="{1}, {2}, {3}"),
     FormatSpec(name="번호 매기기", template="{#}. {1}"),
-    FormatSpec(name="문장 예시", template="{1}님 ({2}) - {3|comma}원"),
 ]
 
 PRESETS_VERSION = 1
@@ -298,13 +357,19 @@ def load_presets(text: str) -> list[FormatSpec]:
 
 
 HELP_TEXT = """\
-템플릿에 적은 글이 엑셀의 한 행마다 반복되고, 행 사이는 줄바꿈으로 이어집니다.
-템플릿을 여러 줄로 쓰면 그 여러 줄이 행마다 반복됩니다. 끝에 빈 줄을 두면 행 사이가 띄어집니다.
+{ } 가 들어 있는 줄은 엑셀의 한 행마다 반복되고, 그 앞뒤 줄은 한 번만 나옵니다.
+
+  11/5일 입고요청          ← 머리말 (한 번)
+  {품명} {규격} {수량}개    ← 행마다 반복
+  오전입고 바랍니다.        ← 꼬리말 (한 번)
+
+반복 줄이 여러 줄이어도 되고, 끝에 빈 줄을 두면 행 사이가 띄어집니다.
+빈 셀은 옆의 공백 하나와 함께 사라져 공백이 두 번 생기지 않습니다.
 
 자리표시자
-  {열이름}      첫 행의 열 이름으로 참조 (예: {이름}, {부서})
+  {열이름}      첫 행의 열 이름으로 참조 (예: {품명}, {수량})
   {1} {2} …    열 번호로 참조 (헤더가 없어도 사용 가능)
-  {#}          행 번호 (1부터),   {행수} 전체 행 수
+  {#}          행 번호 (1부터),   {행수} 전체 행 수,   {오늘} 오늘 날짜 (11/5 형식)
   {{  }}        중괄호를 글자 그대로 넣을 때
 
 필터 (| 로 이어서, 여러 개 가능)

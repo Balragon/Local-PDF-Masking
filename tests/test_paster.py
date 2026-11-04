@@ -1,3 +1,5 @@
+from datetime import date
+
 from excelpaster.core import (
     FormatSpec,
     column_names,
@@ -6,8 +8,20 @@ from excelpaster.core import (
     parse_table,
     render,
     render_template,
+    split_template,
     unknown_placeholders,
 )
+
+ORDER = ("품명\t규격\t수량\r\nXx형태\t700*350*1600\t1\r\nGAa\t백색도장\t1\r\n111N형태\t600*400*1200\t4\r\n"
+         "AR38\t\t20\r\nAED16\t\t8\r\nM161\t\t1\r\n")
+ORDER_EXPECTED = """11/5일 입고요청
+Xx형태 700*350*1600 1개
+GAa 백색도장 1개
+111N형태 600*400*1200 4개
+AR38 20개
+AED16 8개
+M161 1개
+오전입고 바랍니다."""
 
 EXCEL = "이름\t부서\t금액\r\n홍길동\t영업\t1234567\r\n김철수\t개발\t89000\r\n"
 
@@ -43,6 +57,40 @@ def test_template_without_header_row():
     assert render(t, spec) == "홍길동-영업\n김철수-개발"
     assert column_names(t, False) == ["1", "2"]
     assert column_names(parse_table(EXCEL), True) == ["이름", "부서", "금액"]
+
+
+def test_head_body_tail_template():
+    spec = FormatSpec(template="11/5일 입고요청\n{품명} {규격} {수량}개\n오전입고 바랍니다.")
+    assert render(parse_table(ORDER), spec) == ORDER_EXPECTED
+    # 헤더 없이 번호로, 꼬리말 앞 빈 줄 유지
+    body = ORDER.split("\r\n", 1)[1]
+    spec = FormatSpec(template="11/5일 입고요청\n{1} {2} {3}개\n\n오전입고 바랍니다.", header_row=False)
+    assert render(parse_table(body), spec) == ORDER_EXPECTED.replace("\n오전", "\n\n오전")
+
+
+def test_split_template():
+    assert split_template("머리\n{1}\n{2}\n꼬리") == ("머리", "{1}\n{2}", "꼬리")
+    assert split_template("{1}") == ("", "{1}", "")
+    assert split_template("{1}\n") == ("", "{1}\n", "")          # 꼬리말 없음 → 빈 줄은 반복 부분
+    assert split_template("{1}\n\n꼬리") == ("", "{1}", "\n꼬리")  # 꼬리말 있음 → 빈 줄은 꼬리말 앞 간격
+    assert split_template("머리만") == ("", "머리만", "")
+    # {오늘} {행수} 만 있는 줄은 머리말/꼬리말, 반복 줄 사이의 일반 줄은 반복 부분에 포함
+    assert split_template("{오늘}일 요청\n{1}\n---\n{2}\n총 {행수}건") == ("{오늘}일 요청", "{1}\n---\n{2}", "총 {행수}건")
+
+
+def test_today_placeholder():
+    d = date.today()
+    assert render_template("{오늘}", ["a"], ["x"], 1, 1) == f"{d.month}/{d.day}"
+
+
+def test_empty_cell_collapses_one_adjacent_space():
+    h = ["a", "b", "c"]
+    assert render_template("{a} {b} {c}개", h, ["AR38", "", "20"], 1, 1) == "AR38 20개"
+    assert render_template("{a} {b}", h, ["AR38", "", ""], 1, 1) == "AR38"
+    assert render_template("{b} {a}", h, ["AR38", "", ""], 1, 1) == "AR38"
+    assert render_template("[{b}] {a}", h, ["AR38", "", ""], 1, 1) == "[] AR38"
+    assert render_template("{a}  {b}  {c}", h, ["x", "", "z"], 1, 1) == "x   z"  # 공백 하나만 제거
+    assert render_template("  {b} {a}", h, ["AR38", "", ""], 1, 1) == "  AR38"  # 들여쓰기는 유지
 
 
 def test_multiline_template_repeats_per_row():
