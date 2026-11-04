@@ -10,14 +10,6 @@ from dataclasses import asdict, dataclass, replace
 
 Table = list[list[str]]
 
-MODES = ("template", "markdown", "csv", "json")
-MODE_LABELS = {
-    "template": "사용자 템플릿",
-    "markdown": "마크다운 표",
-    "csv": "CSV",
-    "json": "JSON",
-}
-
 # 특수 자리표시자 (열 이름보다 우선하지 않음 — 같은 이름의 열이 있으면 열이 우선)
 ROW_NUMBER_KEYS = ("#", "행번호", "n", "row")
 ROW_COUNT_KEYS = ("행수", "rows", "count")
@@ -29,11 +21,7 @@ class FormatSpec:
     """변환 방법 하나. 프리셋으로 저장/불러오기 할 수 있도록 JSON 직렬화 가능."""
 
     name: str = ""
-    mode: str = "template"
-    row_template: str = "{1}"
-    joiner: str = "\\n"      # 행 사이 (이스케이프 문자열: \n, \t 사용 가능)
-    prefix: str = ""         # 전체 앞
-    suffix: str = ""         # 전체 뒤
+    template: str = "{1}"    # 행마다 반복되는 글. 행 사이는 줄바꿈
     header_row: bool = True  # 첫 행을 열 이름으로 사용
     skip_blank_rows: bool = True
 
@@ -43,10 +31,9 @@ class FormatSpec:
     @classmethod
     def from_dict(cls, d: dict) -> "FormatSpec":
         known = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
-        spec = cls(**known)
-        if spec.mode not in MODES:
-            spec.mode = "template"
-        return spec
+        if "template" not in known and "row_template" in d:  # 이전 버전 프리셋
+            known["template"] = d["row_template"]
+        return cls(**known)
 
     def copy(self, **changes) -> "FormatSpec":
         return replace(self, **changes)
@@ -100,15 +87,6 @@ def column_names(table: Table, header_row: bool) -> list[str]:
 
 
 # ---------------------------------------------------------------- 템플릿
-
-_ESC_RE = re.compile(r"\\(n|t|r|\\)")
-_ESC_MAP = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\"}
-
-
-def unescape(s: str) -> str:
-    """한 줄짜리 입력칸에서 \\n, \\t 를 실제 문자로."""
-    return _ESC_RE.sub(lambda m: _ESC_MAP[m.group(1)], s)
-
 
 class TemplateError(ValueError):
     pass
@@ -275,83 +253,25 @@ def render_template(template: str, headers: list[str], row: list[str],
 
 # ---------------------------------------------------------------- 렌더링
 
-def _md_cell(s: str) -> str:
-    return s.replace("|", "\\|").replace("\r\n", "<br>").replace("\n", "<br>")
-
-
-def render_markdown(headers: list[str], data: Table) -> str:
-    if not headers:
-        return ""
-    cols = [h if h else str(i + 1) for i, h in enumerate(headers)]
-    widths = [len(c) for c in cols]
-    body = [[_md_cell(c) for c in r] for r in data]
-    for r in body:
-        for i, c in enumerate(r):
-            widths[i] = max(widths[i], len(c))
-    widths = [max(w, 3) for w in widths]
-
-    def line(cells: list[str]) -> str:
-        return "| " + " | ".join(c.ljust(widths[i]) for i, c in enumerate(cells)) + " |"
-
-    lines = [line(cols), "| " + " | ".join("-" * w for w in widths) + " |"]
-    lines.extend(line(r) for r in body)
-    return "\n".join(lines)
-
-
-def render_csv(headers: list[str], data: Table, header_row: bool) -> str:
-    buf = io.StringIO()
-    w = csv.writer(buf, lineterminator="\n")
-    if header_row:
-        w.writerow(headers)
-    w.writerows(data)
-    return buf.getvalue().rstrip("\n")
-
-
-def render_json(headers: list[str], data: Table, header_row: bool) -> str:
-    if header_row:
-        keys = [h if h else str(i + 1) for i, h in enumerate(headers)]
-        obj = [dict(zip(keys, r)) for r in data]
-    else:
-        obj = data
-    return json.dumps(obj, ensure_ascii=False, indent=2)
-
-
 def render(table: Table, spec: FormatSpec) -> str:
-    """표 전체를 spec 대로 텍스트로. 템플릿 오류는 TemplateError."""
+    """템플릿을 행마다 적용해 줄바꿈으로 이어 붙인 텍스트. 템플릿 오류는 TemplateError.
+
+    템플릿이 여러 줄이면 그 여러 줄이 행마다 반복된다. 템플릿 끝에 빈 줄을 두면 행 사이가 한 줄 띄어진다.
+    """
     headers, data = split_table(table, spec.header_row, spec.skip_blank_rows)
     if not headers:
         return ""
-    if spec.mode == "markdown":
-        body = render_markdown(headers, data)
-    elif spec.mode == "csv":
-        body = render_csv(headers, data, spec.header_row)
-    elif spec.mode == "json":
-        body = render_json(headers, data, spec.header_row)
-    else:
-        n = len(data)
-        rows = [render_template(spec.row_template, headers, r, i + 1, n) for i, r in enumerate(data)]
-        body = unescape(spec.joiner).join(rows)
-    meta_row = [""] * len(headers)
-    prefix = render_template(unescape(spec.prefix), headers, meta_row, 0, len(data)) if spec.prefix else ""
-    suffix = render_template(unescape(spec.suffix), headers, meta_row, 0, len(data)) if spec.suffix else ""
-    return prefix + body + suffix
+    n = len(data)
+    template = spec.template.replace("\r\n", "\n")
+    return "\n".join(render_template(template, headers, r, i + 1, n) for i, r in enumerate(data))
 
 
 # ---------------------------------------------------------------- 프리셋
 
 BUILTIN_PRESETS: list[FormatSpec] = [
-    FormatSpec(name="한 줄씩: 열을 쉼표로", mode="template",
-               row_template="{1}, {2}, {3}", joiner="\\n"),
-    FormatSpec(name="이름 목록 (쉼표로 이어 붙이기)", mode="template",
-               row_template="{1}", joiner=", "),
-    FormatSpec(name="번호 매기기", mode="template",
-               row_template="{#}. {1}", joiner="\\n"),
-    FormatSpec(name="문장 템플릿 예시", mode="template",
-               row_template="{1}님 ({2}) - {3|comma}원", joiner="\\n",
-               suffix="\\n\\n총 {행수}건"),
-    FormatSpec(name="마크다운 표", mode="markdown"),
-    FormatSpec(name="CSV", mode="csv"),
-    FormatSpec(name="JSON", mode="json"),
+    FormatSpec(name="열을 쉼표로 이어서 한 줄씩", template="{1}, {2}, {3}"),
+    FormatSpec(name="번호 매기기", template="{#}. {1}"),
+    FormatSpec(name="문장 예시", template="{1}님 ({2}) - {3|comma}원"),
 ]
 
 PRESETS_VERSION = 1
@@ -378,10 +298,13 @@ def load_presets(text: str) -> list[FormatSpec]:
 
 
 HELP_TEXT = """\
+템플릿에 적은 글이 엑셀의 한 행마다 반복되고, 행 사이는 줄바꿈으로 이어집니다.
+템플릿을 여러 줄로 쓰면 그 여러 줄이 행마다 반복됩니다. 끝에 빈 줄을 두면 행 사이가 띄어집니다.
+
 자리표시자
   {열이름}      첫 행의 열 이름으로 참조 (예: {이름}, {부서})
   {1} {2} …    열 번호로 참조 (헤더가 없어도 사용 가능)
-  {#}          행 번호 (1부터),   {행수} 전체 행 수,   {열수} 열 수
+  {#}          행 번호 (1부터),   {행수} 전체 행 수
   {{  }}        중괄호를 글자 그대로 넣을 때
 
 필터 (| 로 이어서, 여러 개 가능)
@@ -394,6 +317,4 @@ HELP_TEXT = """\
   {비고|replace:a,b}  a 를 b 로 바꿈
   {메모|oneline}      셀 안의 줄바꿈·연속 공백을 한 칸으로
   {값|quote}          큰따옴표로 감싸기
-
-행 사이 / 앞 / 뒤 칸에서는 \\n (줄바꿈), \\t (탭) 을 쓸 수 있습니다.
 """

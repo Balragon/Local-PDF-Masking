@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLayout,
-    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -29,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from excelpaster import core
-from excelpaster.core import BUILTIN_PRESETS, MODE_LABELS, MODES, FormatSpec
+from excelpaster.core import BUILTIN_PRESETS, FormatSpec
 from masker import theme
 
 APP_NAME = "Excel Paster"
@@ -39,11 +38,11 @@ MAX_PREVIEW_CELLS = 200_000  # 이보다 큰 표는 미리보기만 생략 (복�
 
 def _extra_stylesheet(t: dict[str, str]) -> str:
     return f"""
-    QPlainTextEdit, QLineEdit, QComboBox {{
+    QPlainTextEdit, QComboBox {{
         background: {t['panel']}; border: 1px solid {t['border']}; border-radius: 7px;
         padding: 6px 8px; selection-background-color: {t['accent']};
         selection-color: {t['accent_fg']}; }}
-    QPlainTextEdit:focus, QLineEdit:focus, QComboBox:focus {{ border: 1px solid {t['accent']}; }}
+    QPlainTextEdit:focus, QComboBox:focus {{ border: 1px solid {t['accent']}; }}
     QPlainTextEdit[readOnly="true"] {{ background: {t['canvas']}; }}
     QComboBox::drop-down {{ border: none; width: 22px; }}
     QComboBox QAbstractItemView {{ background: {t['panel']}; border: 1px solid {t['border']};
@@ -247,10 +246,11 @@ class MainWindow(QMainWindow):
         left_w = QWidget()
         left_w.setLayout(left)
 
-        # 2. 양식
+        # 2. 양식: 템플릿 글상자 하나
         self.preset_combo = QComboBox()
         self.preset_combo.currentIndexChanged.connect(self._on_preset_selected)
         self.btn_save_preset = QPushButton("저장…")
+        self.btn_save_preset.setToolTip("지금 템플릿을 이름 붙여 저장 (Ctrl+S)")
         self.btn_save_preset.clicked.connect(self._save_preset)
         self.btn_del_preset = QPushButton("삭제")
         self.btn_del_preset.setObjectName("danger")
@@ -260,67 +260,35 @@ class MainWindow(QMainWindow):
         preset_row.addWidget(self.btn_save_preset)
         preset_row.addWidget(self.btn_del_preset)
 
-        self.mode_combo = QComboBox()
-        for m in MODES:
-            self.mode_combo.addItem(MODE_LABELS[m], m)
-        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
-
         self.chips_box = QWidget()
         self.chips = FlowLayout(self.chips_box)
         self.chips_hint = self._field("열 이름을 클릭하면 템플릿 커서 위치에 들어갑니다")
 
-        self.row_template = QPlainTextEdit()
-        self.row_template.setFont(self._mono())
-        self.row_template.setPlaceholderText("예: {이름}님 ({부서}) - {금액|comma}원")
-        self.row_template.textChanged.connect(self._on_spec_changed)
-        self.row_template.setMaximumHeight(140)
-        self.joiner = QLineEdit()
-        self.joiner.setFont(self._mono())
-        self.joiner.setPlaceholderText("\\n")
-        self.joiner.textChanged.connect(self._on_spec_changed)
-        self.prefix = QLineEdit()
-        self.prefix.setFont(self._mono())
-        self.prefix.setPlaceholderText("예: 명단 ({행수}명)\\n")
-        self.prefix.textChanged.connect(self._on_spec_changed)
-        self.suffix = QLineEdit()
-        self.suffix.setFont(self._mono())
-        self.suffix.setPlaceholderText("예: \\n이상 {행수}건")
-        self.suffix.textChanged.connect(self._on_spec_changed)
+        self.template = QPlainTextEdit()
+        self.template.setFont(self._mono())
+        self.template.setPlaceholderText(
+            "원하는 양식을 글로 적으세요. 엑셀의 한 행마다 이 글이 반복됩니다.\n\n"
+            "예)  {이름}님 ({부서}) - {금액|comma}원\n"
+            "예)  {1}, {2}, {3}\n\n"
+            "{열이름} 또는 {1} {2} 로 셀 값을 넣습니다. 자세한 것은 F1.")
+        self.template.textChanged.connect(self._on_spec_changed)
         self.template_warn = QLabel("")
         self.template_warn.setObjectName("warn")
         self.template_warn.setWordWrap(True)
 
-        self.template_panel = QWidget()
-        tp = QVBoxLayout(self.template_panel)
-        tp.setContentsMargins(0, 0, 0, 0)
-        tp.setSpacing(6)
-        tp.addWidget(self._field("사용할 수 있는 열"))
-        tp.addWidget(self.chips_box)
-        tp.addWidget(self.chips_hint)
-        tp.addSpacing(4)
-        tp.addWidget(self._field("행마다 적용할 템플릿"))
-        tp.addWidget(self.row_template)
-        tp.addWidget(self._field("행 사이에 넣을 문자  (\\n 줄바꿈, \\t 탭)"))
-        tp.addWidget(self.joiner)
-        tp.addWidget(self._field("전체 앞에 붙일 문자"))
-        tp.addWidget(self.prefix)
-        tp.addWidget(self._field("전체 뒤에 붙일 문자"))
-        tp.addWidget(self.suffix)
-        tp.addWidget(self.template_warn)
-
         mid = QVBoxLayout()
         mid.setContentsMargins(6, 10, 6, 12)
         mid.setSpacing(8)
-        mid.addWidget(self._heading("2. 출력 양식"))
-        mid.addWidget(self._field("프리셋"))
+        mid.addWidget(self._heading("2. 출력 양식 (템플릿)"))
+        mid.addWidget(self.chips_box)
+        mid.addWidget(self.chips_hint)
+        mid.addWidget(self.template, 1)
+        mid.addWidget(self.template_warn)
+        mid.addWidget(self._field("저장된 템플릿"))
         mid.addLayout(preset_row)
-        mid.addWidget(self._field("출력 형식"))
-        mid.addWidget(self.mode_combo)
-        mid.addWidget(self.template_panel)
-        mid.addStretch(1)
         mid_w = QWidget()
         mid_w.setLayout(mid)
-        mid_w.setMinimumWidth(340)
+        mid_w.setMinimumWidth(320)
 
         # 3. 결과
         self.output = QPlainTextEdit()
@@ -391,11 +359,7 @@ class MainWindow(QMainWindow):
     def _current_spec(self) -> FormatSpec:
         return FormatSpec(
             name="",
-            mode=self.mode_combo.currentData() or "template",
-            row_template=self.row_template.toPlainText(),
-            joiner=self.joiner.text() or "\\n",
-            prefix=self.prefix.text(),
-            suffix=self.suffix.text(),
+            template=self.template.toPlainText(),
             header_row=self.chk_header.isChecked(),
             skip_blank_rows=self.chk_skip_blank.isChecked(),
         )
@@ -403,16 +367,11 @@ class MainWindow(QMainWindow):
     def _load_spec(self, spec: FormatSpec) -> None:
         self._loading = True
         try:
-            self.mode_combo.setCurrentIndex(max(0, MODES.index(spec.mode)))
-            self.row_template.setPlainText(spec.row_template)
-            self.joiner.setText(spec.joiner)
-            self.prefix.setText(spec.prefix)
-            self.suffix.setText(spec.suffix)
+            self.template.setPlainText(spec.template)
             self.chk_header.setChecked(spec.header_row)
             self.chk_skip_blank.setChecked(spec.skip_blank_rows)
         finally:
             self._loading = False
-        self._on_mode_changed()
         self._on_spec_changed()
 
     def closeEvent(self, event) -> None:  # noqa: N802
@@ -467,10 +426,6 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 양식
 
-    def _on_mode_changed(self) -> None:
-        self.template_panel.setVisible(self.mode_combo.currentData() == "template")
-        self._on_spec_changed()
-
     def _on_spec_changed(self) -> None:
         if self._loading:
             return
@@ -500,8 +455,8 @@ class MainWindow(QMainWindow):
                                 else "먼저 왼쪽에 엑셀 내용을 붙여넣으세요")
 
     def _insert_placeholder(self, name: str) -> None:
-        self.row_template.insertPlainText("{" + name + "}")
-        self.row_template.setFocus()
+        self.template.insertPlainText("{" + name + "}")
+        self.template.setFocus()
 
     # ------------------------------------------------------------ 출력
 
@@ -514,10 +469,9 @@ class MainWindow(QMainWindow):
             self.btn_copy.setEnabled(False)
             return
         headers, data = core.split_table(self.table, spec.header_row, spec.skip_blank_rows)
-        if spec.mode == "template":
-            unknown = core.unknown_placeholders(spec.row_template + spec.prefix + spec.suffix, headers)
-            if unknown:
-                self.template_warn.setText("알 수 없는 자리표시자: " + ", ".join("{" + u + "}" for u in unknown))
+        unknown = core.unknown_placeholders(spec.template, headers)
+        if unknown:
+            self.template_warn.setText("알 수 없는 자리표시자: " + ", ".join("{" + u + "}" for u in unknown))
         try:
             result = core.render(self.table, spec)
         except core.TemplateError as e:
@@ -552,7 +506,7 @@ class MainWindow(QMainWindow):
         self._loading = True
         try:
             self.preset_combo.clear()
-            self.preset_combo.addItem("(프리셋 선택)", None)
+            self.preset_combo.addItem("(저장된 템플릿 선택)", None)
             for i, p in enumerate(self.user_presets):
                 self.preset_combo.addItem(f"★ {p.name}", ("user", i))
             for i, p in enumerate(BUILTIN_PRESETS):

@@ -1,5 +1,3 @@
-import json
-
 from excelpaster.core import (
     FormatSpec,
     column_names,
@@ -8,7 +6,6 @@ from excelpaster.core import (
     parse_table,
     render,
     render_template,
-    unescape,
     unknown_placeholders,
 )
 
@@ -36,23 +33,23 @@ def test_parse_pads_ragged_rows_and_single_column():
 
 def test_template_by_header_number_and_specials():
     t = parse_table(EXCEL)
-    spec = FormatSpec(row_template="{#}/{행수} {이름}({2}) {금액|comma}원", joiner="\\n")
+    spec = FormatSpec(template="{#}/{행수} {이름}({2}) {금액|comma}원")
     assert render(t, spec) == "1/2 홍길동(영업) 1,234,567원\n2/2 김철수(개발) 89,000원"
 
 
 def test_template_without_header_row():
     t = parse_table("홍길동\t영업\n김철수\t개발\n")
-    spec = FormatSpec(row_template="{1}-{2}", joiner=", ", header_row=False)
-    assert render(t, spec) == "홍길동-영업, 김철수-개발"
+    spec = FormatSpec(template="{1}-{2}", header_row=False)
+    assert render(t, spec) == "홍길동-영업\n김철수-개발"
     assert column_names(t, False) == ["1", "2"]
     assert column_names(parse_table(EXCEL), True) == ["이름", "부서", "금액"]
 
 
-def test_prefix_suffix_and_escapes():
+def test_multiline_template_repeats_per_row():
     t = parse_table(EXCEL)
-    spec = FormatSpec(row_template="{이름}", joiner="\\t", prefix="[{행수}명]\\n", suffix="\\n끝")
-    assert render(t, spec) == "[2명]\n홍길동\t김철수\n끝"
-    assert unescape(r"a\nb\tc\\d") == "a\nb\tc\\d"
+    spec = FormatSpec(template="■ {이름}\n  부서: {부서}\n")
+    assert render(t, spec) == "■ 홍길동\n  부서: 영업\n\n■ 김철수\n  부서: 개발\n"
+    assert render(t, FormatSpec(template="{이름}\r\n{부서}")) == "홍길동\n영업\n김철수\n개발"
 
 
 def test_unknown_placeholder_left_as_is_and_reported():
@@ -82,35 +79,16 @@ def test_header_name_case_insensitive_and_duplicates():
 
 def test_skip_blank_rows():
     t = parse_table("h\na\n\t\nb\n")
-    assert render(t, FormatSpec(row_template="{h}", joiner=",")) == "a,b"
-    assert render(t, FormatSpec(row_template="{h}", joiner=",", skip_blank_rows=False)) == "a,,b"
-
-
-def test_markdown():
-    t = parse_table("이름\t비고\n홍길동\ta|b\n김\t\"두\n줄\"\n")
-    out = render(t, FormatSpec(mode="markdown"))
-    assert out.splitlines() == [
-        "| 이름  | 비고     |",
-        "| --- | ------ |",
-        "| 홍길동 | a\\|b   |",
-        "| 김   | 두<br>줄 |",
-    ]
-
-
-def test_csv_and_json():
-    t = parse_table(EXCEL)
-    assert render(t, FormatSpec(mode="csv")) == "이름,부서,금액\n홍길동,영업,1234567\n김철수,개발,89000"
-    assert render(t, FormatSpec(mode="csv", header_row=False)).startswith("이름,부서,금액\n")
-    obj = json.loads(render(t, FormatSpec(mode="json")))
-    assert obj == [{"이름": "홍길동", "부서": "영업", "금액": "1234567"},
-                   {"이름": "김철수", "부서": "개발", "금액": "89000"}]
-    assert json.loads(render(t, FormatSpec(mode="json", header_row=False)))[0] == ["이름", "부서", "금액"]
+    assert render(t, FormatSpec(template="{h}")) == "a\nb"
+    assert render(t, FormatSpec(template="{h}", skip_blank_rows=False)) == "a\n\nb"
 
 
 def test_presets_roundtrip_and_bad_input():
-    presets = [FormatSpec(name="a", row_template="{1}"), FormatSpec(name="b", mode="csv")]
+    presets = [FormatSpec(name="a", template="{1}"), FormatSpec(name="b", template="{2}\n", header_row=False)]
     back = load_presets(dump_presets(presets))
     assert back == presets
     assert load_presets("") == []
     assert load_presets("not json") == []
-    assert load_presets('{"presets":[{"name":"x","mode":"weird","extra":1}]}')[0].mode == "template"
+    # 이전 버전 프리셋(row_template, mode 등) 도 읽힘
+    old = '{"presets":[{"name":"x","mode":"template","row_template":"{이름}","joiner":"\\\\n","extra":1}]}'
+    assert load_presets(old)[0] == FormatSpec(name="x", template="{이름}")
