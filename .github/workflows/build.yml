@@ -40,10 +40,14 @@ jobs:
 
       - name: Make .icns (macOS)
         if: runner.os == 'macOS'
-        run: python scripts/make_icns.py
+        run: |
+          python scripts/make_icns.py masker
+          python scripts/make_icns.py excelpaster
 
       - name: Build
-        run: pyinstaller --noconfirm --clean pdfmasker.spec
+        run: |
+          pyinstaller --noconfirm --clean pdfmasker.spec
+          pyinstaller --noconfirm --clean excelpaster.spec
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -51,21 +55,25 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force out | Out-Null
           Copy-Item "dist/PDF Masker.exe" "out/PDF-Masker-windows.exe"
+          Copy-Item "dist/Excel Paster.exe" "out/Excel-Paster-windows.exe"
 
       - name: Package (macOS .dmg)
         if: runner.os == 'macOS'
         run: |
           mkdir -p out dmgroot
           # 서명 인증서가 없으므로 ad-hoc 서명 (Gatekeeper 경고는 README 참고)
-          codesign --force --deep --sign - "dist/PDF Masker.app"
-          cp -R "dist/PDF Masker.app" dmgroot/
-          ln -s /Applications dmgroot/Applications
-          hdiutil create -volname "PDF Masker" -srcfolder dmgroot -ov -format UDZO \
-            "out/PDF-Masker-${{ matrix.name }}.dmg"
+          for app in "PDF Masker" "Excel Paster"; do
+            codesign --force --deep --sign - "dist/$app.app"
+            rm -rf dmgroot && mkdir dmgroot
+            cp -R "dist/$app.app" dmgroot/
+            ln -s /Applications dmgroot/Applications
+            hdiutil create -volname "$app" -srcfolder dmgroot -ov -format UDZO \
+              "out/${app// /-}-${{ matrix.name }}.dmg"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
-          name: PDF-Masker-${{ matrix.name }}
+          name: apps-${{ matrix.name }}
           path: out/*
 
   release:
