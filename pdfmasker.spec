@@ -3,6 +3,9 @@
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(SPECPATH) / "scripts"))
+from pyi_trim import trim_qt  # noqa: E402  — 쓰지 않는 Qt 구성 요소 제거
+
 from PyInstaller.utils.hooks import collect_all
 
 APP_NAME = "PDF Masker"
@@ -36,6 +39,7 @@ a = Analysis(
               "pymupdf4llm", "pymupdf_layout", "tkinter"],
     noarchive=False,
 )
+trim_qt(a)
 pyz = PYZ(a.pure)
 
 if sys.platform == "darwin":

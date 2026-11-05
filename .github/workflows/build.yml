@@ -35,36 +35,86 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt pyinstaller pillow
+      # 러너 파이썬에 기본으로 깔린 certifi 등이 구버전일 수 있어 점검 전에 최신으로
+      - run: pip install --upgrade certifi setuptools
+
+      - name: Audit dependencies for known vulnerabilities (pip-audit)
+        shell: bash
+        run: |
+          # 번들에 들어가거나 빌드에 쓰이는 패키지 전체를 그대로 점검. 알려진 취약점이 있으면 빌드 실패
+          python -m pip freeze > audit-requirements.txt
+          pipx run pip-audit --no-deps --desc -r audit-requirements.txt
 
       - name: Make .icns (macOS)
         if: runner.os == 'macOS'
-        run: python scripts/make_icns.py
+        run: |
+          python scripts/make_icns.py masker
+          python scripts/make_icns.py excelpaster
 
       - name: Build
-        run: pyinstaller --noconfirm --clean pdfmasker.spec
+        run: |
+          pyinstaller --noconfirm --clean pdfmasker.spec
+          pyinstaller --noconfirm --clean excelpaster.spec
 
+      # 앱마다 폴더를 나눠 아티팩트를 따로 올린다 (각각 받을 수 있게)
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force out | Out-Null
-          Copy-Item "dist/PDF Masker.exe" "out/PDF-Masker-windows.exe"
+          New-Item -ItemType Directory -Force out/pdfmasker, out/excelpaster | Out-Null
+          Copy-Item "dist/PDF Masker.exe" "out/pdfmasker/PDF-Masker-windows.exe"
+          Copy-Item "dist/Excel Paster.exe" "out/excelpaster/Excel-Paster-windows.exe"
+          # SHA-256 체크섬: 받은 파일이 CI 가 만든 그 파일인지 확인용
+          foreach ($dir in "out/pdfmasker", "out/excelpaster") {
+            Get-ChildItem "$dir/*.exe" | ForEach-Object {
+              "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+            } | Set-Content -Encoding ascii "$dir/SHA256SUMS.txt"
+          }
 
       - name: Package (macOS .dmg)
         if: runner.os == 'macOS'
         run: |
-          mkdir -p out dmgroot
+          mkdir -p out/pdfmasker out/excelpaster
           # 서명 인증서가 없으므로 ad-hoc 서명 (Gatekeeper 경고는 README 참고)
-          codesign --force --deep --sign - "dist/PDF Masker.app"
-          cp -R "dist/PDF Masker.app" dmgroot/
-          ln -s /Applications dmgroot/Applications
-          hdiutil create -volname "PDF Masker" -srcfolder dmgroot -ov -format UDZO \
-            "out/PDF-Masker-${{ matrix.name }}.dmg"
+          package() {  # $1 앱 이름, $2 출력 폴더
+            codesign --force --deep --sign - "dist/$1.app"
+            rm -rf dmgroot && mkdir dmgroot
+            cp -R "dist/$1.app" dmgroot/
+            ln -s /Applications dmgroot/Applications
+            hdiutil create -volname "$1" -srcfolder dmgroot -ov -format UDZO \
+              "$2/${1// /-}-${{ matrix.name }}.dmg"
+            (cd "$2" && shasum -a 256 *.dmg > SHA256SUMS.txt)
+          }
+          package "PDF Masker" out/pdfmasker
+          package "Excel Paster" out/excelpaster
+
+      - name: Report sizes and checksums
+        shell: bash
+        run: |
+          {
+            echo "### ${{ matrix.name }} 빌드 결과"
+            echo
+            echo '| 파일 | 크기 |'
+            echo '| --- | --- |'
+            for f in out/*/*.exe out/*/*.dmg; do
+              [ -e "$f" ] || continue
+              echo "| $(basename "$f") | $(du -h "$f" | cut -f1) |"
+            done
+            echo
+            echo '```'
+            cat out/*/SHA256SUMS.txt
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
           name: PDF-Masker-${{ matrix.name }}
-          path: out/*
+          path: out/pdfmasker/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Excel-Paster-${{ matrix.name }}
+          path: out/excelpaster/*
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -73,9 +123,21 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag matches app version
+        run: |
+          v="v$(python3 -c 'from excelpaster._version import __version__; print(__version__)')"
+          if [ "$v" != "$GITHUB_REF_NAME" ]; then
+            echo "태그 $GITHUB_REF_NAME 가 excelpaster/_version.py 의 $v 와 다릅니다"; exit 1
+          fi
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      - name: Merge checksums
+        run: cat artifacts/*/SHA256SUMS.txt > SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          files: |
+            artifacts/**/*.exe
+            artifacts/**/*.dmg
+            SHA256SUMS.txt

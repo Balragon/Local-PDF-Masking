@@ -1,4 +1,7 @@
-"""icon.png -> icon.icns (macOS 전용, iconutil 사용)."""
+"""icon.png -> icon.icns (macOS 전용, iconutil 사용).
+
+사용: python scripts/make_icns.py [masker|excelpaster]  (기본 masker)
+"""
 import shutil
 import subprocess
 import sys
@@ -6,7 +9,8 @@ from pathlib import Path
 
 from PIL import Image
 
-assets = Path(__file__).resolve().parent.parent / "masker" / "assets"
+pkg = sys.argv[1] if len(sys.argv) > 1 else "masker"
+assets = Path(__file__).resolve().parent.parent / pkg / "assets"
 src = assets / "icon.png"
 iconset = assets / "icon.iconset"
 if iconset.exists():

@@ -732,16 +732,29 @@ class MainWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        # 자동 탐지 등으로 들어온 아주 작은(1pt 미만) 영역은 저장을 막지 않도록 걸러 낸다
+        regions = {p: [r for r in rs if r[2] - r[0] >= 1 and r[3] - r[1] >= 1] for p, rs in self.regions.items()}
+        regions = {p: rs for p, rs in regions.items() if rs}
+        if not regions:
+            QMessageBox.information(self, "영역 없음", "가릴 수 있는 크기의 영역이 없습니다.")
+            return
         progress = QProgressDialog("마스킹 적용 중…", None, 0, 0, self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.show()
         QApplication.processEvents()
         try:
-            redact_pdf(self.pdf_path, dst, self.regions, rasterize=self.rasterize.isChecked(),
+            redact_pdf(self.pdf_path, dst, regions, rasterize=self.rasterize.isChecked(),
                        password=self.password)
         except Exception as exc:  # noqa: BLE001
             progress.close()
-            QMessageBox.critical(self, "저장 실패", f"저장 중 오류가 발생했습니다.\n{exc}")
+            import traceback
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Critical)
+            box.setWindowTitle("저장 실패")
+            box.setText(f"저장 중 오류가 발생했습니다.\n{type(exc).__name__}: {exc}")
+            box.setInformativeText("'자세히' 내용을 복사해서 알려 주시면 원인을 찾는 데 도움이 됩니다.")
+            box.setDetailedText(traceback.format_exc())
+            box.exec()
             return
         progress.close()
         self.status_left.setText(f"저장 완료: {dst}")
