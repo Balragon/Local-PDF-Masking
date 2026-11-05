@@ -5,8 +5,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QSettings, QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QFont, QFontDatabase, QGuiApplication, QIcon, QKeySequence
+from PySide6.QtCore import QEvent, QPoint, QRect, QSettings, QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QFontDatabase, QGuiApplication, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressDialog,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -32,7 +33,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from excelpaster import core
+from excelpaster import core, updater
+from excelpaster._version import __version__
 from excelpaster.core import BUILTIN_PRESETS, FormatSpec
 from masker import theme
 
@@ -58,6 +60,8 @@ def _extra_stylesheet(t: dict[str, str]) -> str:
         padding: 4px 6px; font-weight: 600; }}
     QTableCornerButton::section {{ background: {t['bg']}; border: none; }}
     QFrame#dropzone:hover {{ border-color: {t['accent']}; }}
+    QPushButton#update {{ background: {t['accent']}; color: {t['accent_fg']}; border: none;
+        border-radius: 6px; padding: 3px 10px; font-weight: 600; }}
     QComboBox::drop-down {{ border: none; width: 22px; }}
     QComboBox QAbstractItemView {{ background: {t['panel']}; border: 1px solid {t['border']};
         selection-background-color: {t['selected']}; selection-color: {t['text']}; outline: none; }}
@@ -68,6 +72,40 @@ def _extra_stylesheet(t: dict[str, str]) -> str:
     QLabel#ok {{ color: {t['muted']}; }}
     QLabel#field {{ color: {t['muted']}; font-size: 12px; }}
     """
+
+
+class _CheckThread(QThread):
+    """백그라운드에서 최신 릴리스 조회."""
+    done = Signal(object)   # updater.Release | None
+    failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            self.done.emit(updater.fetch_latest())
+        except updater.UpdateError as e:
+            self.failed.emit(str(e))
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+class _DownloadThread(QThread):
+    """새 버전 다운로드 + 체크섬 검증."""
+    progress = Signal(int, int)
+    done = Signal(object)   # Path
+    failed = Signal(str)
+
+    def __init__(self, release: updater.Release) -> None:
+        super().__init__()
+        self._release = release
+
+    def run(self) -> None:
+        try:
+            path = updater.download_and_verify(self._release, lambda got, total: self.progress.emit(got, total))
+            self.done.emit(path)
+        except updater.UpdateError as e:
+            self.failed.emit(str(e))
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(f"{type(e).__name__}: {e}")
 
 
 class FlowLayout(QLayout):
@@ -138,8 +176,10 @@ class FlowLayout(QLayout):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle(APP_NAME)
+        self.setWindowTitle(f"{APP_NAME} {__version__}")
         self.resize(1240, 760)
+        self._latest: updater.Release | None = None
+        self._threads: list[QThread] = []
         self.settings = QSettings(ORG_NAME, APP_NAME)
         self.table: core.Table = []
         self.user_presets: list[FormatSpec] = core.load_presets(self.settings.value("presets", "", str))
@@ -158,6 +198,8 @@ class MainWindow(QMainWindow):
         QGuiApplication.styleHints().colorSchemeChanged.connect(lambda _: self._apply_theme())
         self._restore_state()
         self._reload_preset_combo()
+        if self.settings.value("check_updates", True, bool):
+            QTimer.singleShot(1500, lambda: self._check_updates(silent=True))
         self.paste_hint.setFocus()
 
     # ------------------------------------------------------------ UI
@@ -199,6 +241,12 @@ class MainWindow(QMainWindow):
         self.act_export = act("프리셋 내보내기…", self._export_presets)
         self.act_import = act("프리셋 가져오기…", self._import_presets)
         self.act_help = act("자리표시자 도움말", self._show_help, "F1")
+        self.act_check_update = act("업데이트 확인…", lambda: self._check_updates(silent=False))
+        self.act_auto_update = QAction("시작할 때 업데이트 확인", self)
+        self.act_auto_update.setCheckable(True)
+        self.act_auto_update.setChecked(self.settings.value("check_updates", True, bool))
+        self.act_auto_update.toggled.connect(lambda v: self.settings.setValue("check_updates", v))
+        self.act_about = act("정보", self._show_about)
         self.act_quit = act("종료", self.close, "Ctrl+Q")
 
         self.toolbar = QToolBar("도구")
@@ -226,6 +274,11 @@ class MainWindow(QMainWindow):
             m.addAction(a)
         m = self.menuBar().addMenu("도움말")
         m.addAction(self.act_help)
+        m.addSeparator()
+        m.addAction(self.act_check_update)
+        m.addAction(self.act_auto_update)
+        m.addSeparator()
+        m.addAction(self.act_about)
 
     def _build_ui(self) -> None:
         # 1. 입력: 복사한 내용을 엑셀처럼 격자 표로 보여 준다 (붙여넣기는 Ctrl+V 또는 안내 화면 클릭)
@@ -378,8 +431,15 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.splitter)
 
         self.status_left = QLabel("엑셀에서 복사 → 붙여넣기 → 결과 복사")
-        self.status_right = QLabel("")
+        self.status_right = QLabel(f"v{__version__}")
+        self.status_right.setObjectName("hint")
+        self.btn_update = QPushButton("")
+        self.btn_update.setObjectName("update")
+        self.btn_update.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_update.clicked.connect(self._start_update)
+        self.btn_update.hide()
         self.statusBar().addWidget(self.status_left, 1)
+        self.statusBar().addPermanentWidget(self.btn_update)
         self.statusBar().addPermanentWidget(self.status_right)
 
     def _apply_theme(self) -> None:
@@ -732,6 +792,109 @@ class MainWindow(QMainWindow):
         self.settings.setValue("presets", core.dump_presets(self.user_presets))
         self._reload_preset_combo()
         self.status_left.setText(f"프리셋 {added}개 가져옴")
+
+    # ------------------------------------------------------------ 업데이트
+
+    def _check_updates(self, silent: bool) -> None:
+        t = _CheckThread()
+        t.done.connect(lambda rel: self._on_update_checked(rel, silent))
+        t.failed.connect(lambda msg: self._on_update_check_failed(msg, silent))
+        t.finished.connect(lambda: self._threads.remove(t) if t in self._threads else None)
+        self._threads.append(t)
+        if not silent:
+            self.status_left.setText("업데이트 확인 중…")
+        t.start()
+
+    def _on_update_checked(self, rel: updater.Release | None, silent: bool) -> None:
+        if rel is not None and updater.is_newer(rel.version):
+            self._latest = rel
+            self.btn_update.setText(f"새 버전 v{rel.version} — 업데이트")
+            self.btn_update.show()
+            self.status_left.setText(f"새 버전 v{rel.version} 이 있습니다. 오른쪽 아래 버튼으로 업데이트하세요.")
+            return
+        if not silent:
+            if rel is None:
+                QMessageBox.information(self, "업데이트 확인", "아직 배포된 버전이 없습니다.")
+            else:
+                QMessageBox.information(self, "업데이트 확인", f"최신 버전입니다. (v{__version__})")
+            self.status_left.setText(f"최신 버전입니다 (v{__version__})")
+
+    def _on_update_check_failed(self, msg: str, silent: bool) -> None:
+        if silent:
+            self.status_right.setToolTip(f"업데이트 확인 실패: {msg}")
+            return
+        QMessageBox.warning(self, "업데이트 확인", f"확인하지 못했습니다.\n{msg}")
+        self.status_left.setText("업데이트 확인 실패")
+
+    def _start_update(self) -> None:
+        rel = self._latest
+        if rel is None:
+            return
+        notes = rel.notes.strip()
+        text = f"v{__version__} → v{rel.version} 으로 업데이트할까요?\n\n받은 파일은 SHA-256 체크섬으로 검증한 뒤 교체합니다."
+        if sys.platform == "win32":
+            text += "\n교체를 위해 앱이 잠시 종료되었다가 자동으로 다시 실행됩니다."
+        box = QMessageBox(self)
+        box.setWindowTitle("업데이트")
+        box.setText(text)
+        if notes:
+            box.setDetailedText(notes)
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.button(QMessageBox.StandardButton.Yes).setText("업데이트")
+        box.button(QMessageBox.StandardButton.No).setText("나중에")
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+        if not rel.asset_url():
+            QMessageBox.information(self, "업데이트", "이 운영체제용 파일이 없어 릴리스 페이지를 엽니다.")
+            QDesktopServices.openUrl(QUrl(rel.page_url))
+            return
+        progress = QProgressDialog("새 버전을 받는 중…", "취소", 0, 100, self)
+        progress.setWindowTitle("업데이트")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        t = _DownloadThread(rel)
+
+        def on_progress(got: int, total: int) -> None:
+            if total:
+                progress.setMaximum(100)
+                progress.setValue(min(100, got * 100 // total))
+                progress.setLabelText(f"새 버전을 받는 중… {got / 1048576:.1f} / {total / 1048576:.1f} MB")
+            else:
+                progress.setMaximum(0)
+
+        def on_done(path) -> None:
+            progress.close()
+            try:
+                msg = updater.apply_update(path)
+            except updater.UpdateError as e:
+                QMessageBox.warning(self, "업데이트", str(e))
+                return
+            QMessageBox.information(self, "업데이트", msg)
+            if sys.platform == "win32":
+                self.close()
+
+        def on_failed(msg: str) -> None:
+            progress.close()
+            QMessageBox.warning(self, "업데이트 실패", msg)
+
+        t.progress.connect(on_progress)
+        t.done.connect(on_done)
+        t.failed.connect(on_failed)
+        progress.canceled.connect(t.requestInterruption)
+        t.finished.connect(lambda: self._threads.remove(t) if t in self._threads else None)
+        self._threads.append(t)
+        t.start()
+
+    def _show_about(self) -> None:
+        QMessageBox.about(
+            self, "Excel Paster 정보",
+            f"<b>Excel Paster</b> v{__version__}<br><br>"
+            "엑셀에서 복사한 표를 템플릿대로 텍스트로 바꿔 줍니다.<br>"
+            "모든 변환은 내 컴퓨터 안에서만 이루어집니다.<br><br>"
+            f"업데이트 확인은 GitHub Releases 에 버전만 조회합니다.<br>"
+            f'<a href="{updater.RELEASES_PAGE}">{updater.RELEASES_PAGE}</a>',
+        )
 
     # ------------------------------------------------------------ 도움말
 
