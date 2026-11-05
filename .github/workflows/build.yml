@@ -99,7 +99,7 @@ jobs:
             echo '```'
             cat out/SHA256SUMS-*.txt
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
