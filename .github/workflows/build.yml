@@ -36,6 +36,13 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements.txt pyinstaller pillow
 
+      - name: Audit dependencies for known vulnerabilities (pip-audit)
+        shell: bash
+        run: |
+          # 번들에 들어가거나 빌드에 쓰이는 패키지 전체를 그대로 점검. 알려진 취약점이 있으면 빌드 실패
+          python -m pip freeze > audit-requirements.txt
+          pipx run pip-audit --no-deps --desc -r audit-requirements.txt
+
       - name: Make .icns (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -54,6 +61,10 @@ jobs:
           New-Item -ItemType Directory -Force out | Out-Null
           Copy-Item "dist/PDF Masker.exe" "out/PDF-Masker-windows.exe"
           Copy-Item "dist/Excel Paster.exe" "out/Excel-Paster-windows.exe"
+          # SHA-256 체크섬: 받은 파일이 CI 가 만든 그 파일인지 확인용
+          Get-ChildItem out/*.exe | ForEach-Object {
+            "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content -Encoding ascii out/SHA256SUMS-windows.txt
 
       - name: Package (macOS .dmg)
         if: runner.os == 'macOS'
@@ -68,6 +79,25 @@ jobs:
             hdiutil create -volname "$app" -srcfolder dmgroot -ov -format UDZO \
               "out/${app// /-}-${{ matrix.name }}.dmg"
           done
+          (cd out && shasum -a 256 *.dmg > "SHA256SUMS-${{ matrix.name }}.txt")
+
+      - name: Report sizes and checksums
+        shell: bash
+        run: |
+          {
+            echo "### ${{ matrix.name }} 빌드 결과"
+            echo
+            echo '| 파일 | 크기 |'
+            echo '| --- | --- |'
+            for f in out/*.exe out/*.dmg; do
+              [ -e "$f" ] || continue
+              echo "| $(basename "$f") | $(du -h "$f" | cut -f1) |"
+            done
+            echo
+            echo '```'
+            cat out/SHA256SUMS-*.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:

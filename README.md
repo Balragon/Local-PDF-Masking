@@ -37,6 +37,11 @@ GitHub Actions가 자동으로 빌드합니다. 저장소의 **Actions** 탭 →
 >
 > 서명 인증서가 있다면 `.github/workflows/build.yml` 의 패키징 단계에 서명을 추가하면 됩니다.
 
+**빌드 신뢰성**: 모든 실행 파일은 GitHub 가 제공하는 깨끗한 가상머신에서 이 저장소의 소스만으로 빌드됩니다.
+빌드마다 포함되는 패키지 전체를 `pip-audit` 로 알려진 취약점 점검을 하고(발견 시 빌드 실패), 산출물의 SHA-256 체크섬을
+`SHA256SUMS-*.txt` 로 함께 올립니다. Actions 실행 페이지의 Summary 에서 파일 크기와 체크섬을 바로 볼 수 있습니다.
+받은 파일은 Windows 에서 `certutil -hashfile 파일.exe SHA256`, macOS 에서 `shasum -a 256 파일.dmg` 로 대조하면 됩니다.
+
 ## 사용법
 
 1. PDF를 창에 끌어다 놓거나 `Ctrl+O`로 엽니다.
@@ -93,6 +98,7 @@ pytest -q                        # 테스트
 | `excelpaster/gui.py` | Excel Paster PySide6 UI |
 | `tests/` | 핵심 로직 테스트 (`test_core.py`·`test_detect.py` PDF Masker, `test_paster.py` Excel Paster) |
 | `pdfmasker.spec`, `excelpaster.spec` | PyInstaller 빌드 스펙 |
+| `scripts/pyi_trim.py` | 번들에서 쓰지 않는 Qt 모듈·플러그인·번역을 걸러내 실행 파일 크기 축소 |
 | `.github/workflows/build.yml` | Windows/macOS 자동 빌드 및 릴리스 |
 
 ---
