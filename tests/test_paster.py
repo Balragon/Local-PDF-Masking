@@ -3,8 +3,11 @@ from datetime import date
 from excelpaster.core import (
     FormatSpec,
     column_names,
+    header_row_count,
     looks_like_header,
+    merged_header_names,
     parse_column_names,
+    placeholders,
     resolve_table,
     dump_presets,
     load_presets,
@@ -91,7 +94,8 @@ def test_empty_cell_collapses_one_adjacent_space():
     assert render_template("{a} {b} {c}개", h, ["AR38", "", "20"], 1, 1) == "AR38 20개"
     assert render_template("{a} {b}", h, ["AR38", "", ""], 1, 1) == "AR38"
     assert render_template("{b} {a}", h, ["AR38", "", ""], 1, 1) == "AR38"
-    assert render_template("[{b}] {a}", h, ["AR38", "", ""], 1, 1) == "[] AR38"
+    assert render_template("[[{b}]] {a}", h, ["AR38", "", ""], 1, 1) == "[] AR38"  # [[ ]] 는 글자 그대로
+    assert render_template("[{b}] {a}", h, ["AR38", "", ""], 1, 1) == "AR38"        # 묶음은 비면 생략
     assert render_template("{a}  {b}  {c}", h, ["x", "", "z"], 1, 1) == "x   z"  # 공백 하나만 제거
     assert render_template("  {b} {a}", h, ["AR38", "", ""], 1, 1) == "  AR38"  # 들여쓰기는 유지
 
@@ -161,7 +165,7 @@ def test_real_sheet_header_row():
     out = render(t, spec)
     assert out.splitlines()[1:] == ["Xx형태 700*350*1600 SUS304 1개", "AR38 20개", "오전입고 바랍니다."]
     # 셀 안 줄바꿈·공백이 든 열 이름도 여러 방식으로 참조 가능
-    assert render(t, FormatSpec(template="{입고예정}|{입고 예정}|{매입가}|{출고예정일}")).splitlines()[0] == "11/5|11/5|10000|"
+    assert render(t, FormatSpec(template="{입고예정}|{입고 예정}|{매입가}|{출고예정일}")).splitlines()[0] == "11/5|11/5|10000"
     assert unknown_placeholders("{입고예정} {없음}", split_table(t, True)[0]) == ["없음"]
 
 
@@ -199,3 +203,50 @@ def test_parse_column_names():
     known = [" ".join(k.split()) for k in known]
     out = render(parse_table(REAL_ROWS), FormatSpec(template="{품명} {규격} {재질} {수량}개"), known)
     assert out == "Xx형태 700*350*1600 SUS304 1개\nAR38 20개"
+
+
+TWO_ROW_HEADER = ("품명\t규격\t\t\t\t재질\t수량\t 매입가 \t 판매가 \t주요사양\t비고\t발주처\t작성일\t"
+                  "\"입고\n예정\"\t입고일\t출고       예정일\t출고일\r\n"
+                  "\t두께\t가로 \t세로 \t높이\t\t\t\t\t\t\t\t\t\t\t\t\r\n")
+TWO_ROW_DATA = ("Xx형태\t1.2\t700\t350\t1600\tSUS304\t1\t\t\t\t\t\t\t\t\t\t\r\n"
+                "GAa\t\t\t\t\tSTEEL\t1\t\t\t\t\t\t\t\t\t\t\r\n"
+                "AR38\t\t\t\t\t\t20\t\t\t\t\t\t\t\t\t\t\r\n")
+ORDER_TPL = "{오늘}일 입고요청\n{품명} [{가로}*{세로}*{높이}] {재질} {수량}개\n오전입고 바랍니다."
+
+
+def test_two_row_header_is_merged():
+    t = parse_table(TWO_ROW_HEADER + TWO_ROW_DATA)
+    assert header_row_count(t, [], ORDER_TPL) == 2
+    names = merged_header_names(t, 2)
+    assert names[:7] == ["품명", "두께", "가로", "세로", "높이", "재질", "수량"]
+    headers, rows, n = resolve_table(t, FormatSpec(template=ORDER_TPL))
+    assert n == 2 and len(rows) == 3 and headers[:5] == ["품명", "두께", "가로", "세로", "높이"]
+    out = render(t, FormatSpec(template=ORDER_TPL)).splitlines()
+    assert out[1:] == ["Xx형태 700*350*1600 SUS304 1개", "GAa STEEL 1개", "AR38 20개", "오전입고 바랍니다."]
+    # 저장된 열 이름(두 줄 합친 것)으로 데이터만 복사해도 같은 결과
+    out2 = render(parse_table(TWO_ROW_DATA), FormatSpec(template=ORDER_TPL), names).splitlines()
+    assert out2[1:] == out[1:]
+    # 저장된 열 이름이 있을 때 두 줄 헤더째로 복사해도 둘 다 건너뜀
+    assert resolve_table(t, FormatSpec(template=ORDER_TPL), names)[2] == 2
+    # 한 줄짜리 헤더는 그대로 한 줄
+    assert header_row_count(parse_table(REAL_HEADER + REAL_ROWS), [], ORDER_TPL) == 1
+
+
+def test_groups_and_separators():
+    h = ["a", "b", "c", "t"]
+    r = lambda tpl, row: render_template(tpl, h, row, 1, 1)  # noqa: E731
+    assert r("{a}*{b}*{c}", ["700", "350", "1600", ""]) == "700*350*1600"
+    assert r("{a}*{b}*{c}", ["700", "", "1600", ""]) == "700*1600"
+    assert r("{a}*{b}*{c}", ["", "", "", ""]) == ""
+    assert r("X [{a}*{b}*{c}] Y", ["", "", "", ""]) == "X Y"
+    assert r("X [{a}*{b}*{c}] Y", ["1", "2", "3", ""]) == "X 1*2*3 Y"
+    assert r("[{t}t] {a}", ["7", "", "", ""]) == "7"
+    assert r("[{t}t] {a}", ["7", "", "", "1.2"]) == "1.2t 7"
+    assert r("[{t}t] [{a}*{b}*{c}]", ["", "", "", ""]) == ""
+    # 자리표시자가 없는 대괄호, 짝이 안 맞는 대괄호, 줄을 넘는 대괄호는 글자 그대로
+    assert r("[메모] {a}", ["x", "", "", ""]) == "[메모] x"
+    assert r("[{a} {b}", ["x", "", "", ""]) == "[x"
+    assert r("[{a}\n{b}]", ["x", "y", "", ""]) == "[x\ny]"
+    # 공백이 든 구분자는 그대로 (단어는 지우지 않음)
+    assert r("{a} 및 {b}", ["x", "", "", ""]) == "x 및"
+    assert placeholders("[{가로}*{세로}] {수량|comma}") == ["가로", "세로", "수량"]

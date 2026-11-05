@@ -320,7 +320,7 @@ class MainWindow(QMainWindow):
             "나머지 줄은 한 번만 나옵니다.\n\n"
             "예)\n"
             "11/5일 입고요청\n"
-            "{품명} {규격} {재질} {수량}개\n"
+            "{품명} [{가로}*{세로}*{높이}] {재질} {수량}개\n"
             "오전입고 바랍니다.\n\n"
             "{열이름} 또는 {1} {2} 로 셀 값을 넣습니다. 자세한 것은 F1.")
         self.template.textChanged.connect(self._on_spec_changed)
@@ -525,18 +525,25 @@ class MainWindow(QMainWindow):
     def _grab_header(self) -> None:
         if not self.table:
             return
-        names = [core.normalize_header(c) for c in self.table[0]]
+        rows = core.header_row_count(self.table, [], self.template.toPlainText()) or 1
+        names = core.merged_header_names(self.table, rows)
         while names and not names[-1]:
             names.pop()
         self.col_names.setText(", ".join(names))
-        self.status_left.setText("첫 행을 열 이름으로 저장했습니다. 이제 데이터만 복사해도 이름으로 참조됩니다.")
+        what = "첫 두 행을 합쳐" if rows == 2 else "첫 행을"
+        self.status_left.setText(f"{what} 열 이름으로 저장했습니다. 이제 데이터만 복사해도 이름으로 참조됩니다.")
 
-    def _update_input_status(self, is_header: bool, data_rows: int) -> None:
+    def _update_input_status(self, header_rows: int, data_rows: int) -> None:
         if not self.table:
             self.input_status.setText("")
             return
         rows, cols = len(self.table), len(self.table[0])
-        how = "첫 행은 열 이름으로 인식해 건너뜀" if is_header else "모든 행을 데이터로 처리"
+        if header_rows == 2:
+            how = "첫 두 행은 열 이름으로 인식해 건너뜀"
+        elif header_rows:
+            how = "첫 행은 열 이름으로 인식해 건너뜀"
+        else:
+            how = "모든 행을 데이터로 처리"
         more = f" (표에는 {MAX_GRID_ROWS}행까지만 표시)" if data_rows > MAX_GRID_ROWS else ""
         self.input_status.setText(f"{rows}행 × {cols}열 감지 · {how} · 데이터 {data_rows}행{more}")
 
