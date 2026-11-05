@@ -7,6 +7,7 @@ from excelpaster.core import (
     load_presets,
     parse_table,
     render,
+    split_table,
     render_template,
     split_template,
     unknown_placeholders,
@@ -140,3 +141,23 @@ def test_presets_roundtrip_and_bad_input():
     # 이전 버전 프리셋(row_template, mode 등) 도 읽힘
     old = '{"presets":[{"name":"x","mode":"template","row_template":"{이름}","joiner":"\\\\n","extra":1}]}'
     assert load_presets(old)[0] == FormatSpec(name="x", template="{이름}")
+
+
+REAL_HEADER = ("품명\t규격\t\t\t\t재질\t수량\t 매입가 \t 판매가 \t주요사양\t비고\t발주처\t작성일\t"
+               "\"입고\n예정\"\t입고일\t출고       예정일\t출고일\r\n")
+REAL_ROWS = ("Xx형태\t700*350*1600\t\t\t\tSUS304\t1\t10000\t12000\t\t\tA사\t11/1\t11/5\t\t\t\r\n"
+             "AR38\t\t\t\t\t\t20\t\t\t\t\t\t\t\t\t\t\r\n")
+
+
+def test_real_sheet_header_row():
+    t = parse_table(REAL_HEADER + REAL_ROWS)
+    assert len(t[0]) == 17
+    names = column_names(t, True)
+    assert names[:7] == ["품명", "규격", "3", "4", "5", "재질", "수량"]
+    assert names[7] == "매입가" and names[13] == "입고 예정" and names[15] == "출고 예정일"
+    spec = FormatSpec(template="{오늘}일 입고요청\n{품명} {규격} {재질} {수량}개\n오전입고 바랍니다.")
+    out = render(t, spec)
+    assert out.splitlines()[1:] == ["Xx형태 700*350*1600 SUS304 1개", "AR38 20개", "오전입고 바랍니다."]
+    # 셀 안 줄바꿈·공백이 든 열 이름도 여러 방식으로 참조 가능
+    assert render(t, FormatSpec(template="{입고예정}|{입고 예정}|{매입가}|{출고예정일}")).splitlines()[0] == "11/5|11/5|10000|"
+    assert unknown_placeholders("{입고예정} {없음}", split_table(t, True)[0]) == ["없음"]

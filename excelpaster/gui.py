@@ -271,7 +271,7 @@ class MainWindow(QMainWindow):
             "나머지 줄은 한 번만 나옵니다.\n\n"
             "예)\n"
             "11/5일 입고요청\n"
-            "{품명} {규격} {수량}개\n"
+            "{품명} {규격} {재질} {수량}개\n"
             "오전입고 바랍니다.\n\n"
             "{열이름} 또는 {1} {2} 로 셀 값을 넣습니다. 자세한 것은 F1.")
         self.template.textChanged.connect(self._on_spec_changed)

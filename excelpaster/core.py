@@ -66,13 +66,18 @@ def parse_table(text: str) -> Table:
     return rows
 
 
+def normalize_header(h: str) -> str:
+    """열 이름 정리: 앞뒤 공백 제거, 셀 안의 줄바꿈·연속 공백은 한 칸으로 ('입고\\n예정' → '입고 예정')."""
+    return " ".join(h.split())
+
+
 def split_table(table: Table, header_row: bool, skip_blank_rows: bool = True) -> tuple[list[str], Table]:
     """(열 이름 목록, 데이터 행) 으로 분리. 헤더가 없으면 열 이름은 '1', '2', ..."""
     if not table:
         return [], []
     width = len(table[0])
     if header_row:
-        headers = [h.strip() for h in table[0]]
+        headers = [normalize_header(h) for h in table[0]]
         data = table[1:]
     else:
         headers = [str(i + 1) for i in range(width)]
@@ -158,20 +163,19 @@ def _build_lookup(headers: list[str]) -> dict[str, int]:
     """열 이름 → 인덱스. 같은 이름이 여러 개면 첫 번째. 대소문자 무시 키도 추가."""
     lookup: dict[str, int] = {}
     for i, h in enumerate(headers):
-        h = h.strip()
+        h = normalize_header(h)
         if not h:
             continue
-        lookup.setdefault(h, i)
-        lookup.setdefault(h.lower(), i)
+        for key in (h, h.lower(), h.replace(" ", ""), h.replace(" ", "").lower()):
+            lookup.setdefault(key, i)  # '입고 예정' 은 {입고 예정} 으로도 {입고예정} 으로도 참조 가능
     return lookup
 
 
 def _resolve_index(name: str, lookup: dict[str, int], width: int) -> int | None:
-    name = name.strip()
-    if name in lookup:
-        return lookup[name]
-    if name.lower() in lookup:
-        return lookup[name.lower()]
+    name = normalize_header(name)
+    for key in (name, name.lower(), name.replace(" ", ""), name.replace(" ", "").lower()):
+        if key in lookup:
+            return lookup[key]
     if name.isdigit():
         i = int(name) - 1
         return i if 0 <= i < width else None
@@ -327,8 +331,9 @@ def render(table: Table, spec: FormatSpec) -> str:
 # ---------------------------------------------------------------- 프리셋
 
 BUILTIN_PRESETS: list[FormatSpec] = [
-    FormatSpec(name="입고요청 예시 (머리말·꼬리말)",
-               template="{오늘}일 입고요청\n{1} {2} {3}개\n오전입고 바랍니다."),
+    FormatSpec(name="입고요청 (품명·규격·재질·수량)",
+               template="{오늘}일 입고요청\n{품명} {규격} {재질} {수량}개\n오전입고 바랍니다."),
+    FormatSpec(name="품명·규격·재질·수량 한 줄씩", template="{품명} {규격} {재질} {수량}"),
     FormatSpec(name="열을 쉼표로 이어서 한 줄씩", template="{1}, {2}, {3}"),
     FormatSpec(name="번호 매기기", template="{#}. {1}"),
 ]
