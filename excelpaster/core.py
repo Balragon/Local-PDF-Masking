@@ -23,8 +23,8 @@ class FormatSpec:
     """변환 방법 하나. 프리셋으로 저장/불러오기 할 수 있도록 JSON 직렬화 가능."""
 
     name: str = ""
-    template: str = "{1}"    # 행마다 반복되는 글. 행 사이는 줄바꿈
-    header_row: bool = True  # 첫 행을 열 이름으로 사용
+    template: str = "{1}"           # 행마다 반복되는 글. 행 사이는 줄바꿈
+    header_row: bool | None = None  # None = 첫 행이 열 이름인지 자동 판단, True/False = 강제
     skip_blank_rows: bool = True
 
     def to_dict(self) -> dict:
@@ -87,10 +87,69 @@ def split_table(table: Table, header_row: bool, skip_blank_rows: bool = True) ->
     return headers, data
 
 
-def column_names(table: Table, header_row: bool) -> list[str]:
-    """GUI 자리표시자 칩에 쓸 이름들. 헤더가 비어 있으면 번호로 대체."""
-    headers, _ = split_table(table, header_row, skip_blank_rows=False)
+def column_names(headers: list[str]) -> list[str]:
+    """GUI 자리표시자 칩에 쓸 이름들. 이름이 비어 있으면 번호로 대체."""
     return [h if h else str(i + 1) for i, h in enumerate(headers)]
+
+
+def parse_column_names(text: str) -> list[str]:
+    """사용자가 적어 둔 열 이름 목록 ('품명, 규격, , , , 재질, 수량' 또는 탭 구분) → 리스트."""
+    if not text.strip():
+        return []
+    sep = "\t" if "\t" in text else ","
+    return [normalize_header(c) for c in text.split(sep)]
+
+
+_NUMERIC_CELL = re.compile(r"^[\s\-+]?[\d,.]+\s*%?$")
+
+
+def looks_like_header(table: Table, known_headers: list[str], template: str) -> bool:
+    """첫 행이 열 이름인지 판단.
+
+    1) 저장된 열 이름이 있으면: 첫 행의 셀 절반 이상이 그 이름과 같을 때
+    2) 템플릿에 쓴 열 이름({품명} 등)이 첫 행에 있을 때
+    3) 그 외: 첫 행엔 숫자 셀이 없고 아래 행엔 숫자 셀이 있을 때 (헤더엔 보통 숫자가 없음)
+    """
+    if not table:
+        return False
+    cells = [normalize_header(c) for c in table[0]]
+    nonempty = [c for c in cells if c]
+    if not nonempty:
+        return False
+    squashed = {c.replace(" ", "").lower() for c in nonempty}
+    known = {k.replace(" ", "").lower() for k in (normalize_header(k) for k in known_headers) if k}
+    if known:
+        matches = sum(1 for c in squashed if c in known)
+        return matches >= max(1, (len(nonempty) + 1) // 2)
+    names = [n.replace(" ", "").lower() for n in placeholders(template) if not n.isdigit() and not _is_special(n)]
+    if names and any(n in squashed for n in names):
+        return True
+    first_has_number = any(_NUMERIC_CELL.match(c) for c in nonempty)
+    rest_has_number = any(_NUMERIC_CELL.match(c.strip()) for r in table[1:] for c in r if c.strip())
+    return not first_has_number and rest_has_number
+
+
+def resolve_table(table: Table, spec: FormatSpec, known_headers: list[str] | None = None
+                  ) -> tuple[list[str], Table, bool]:
+    """(열 이름, 데이터 행, 첫 행을 열 이름으로 건너뛰었는지).
+
+    저장된 열 이름(known_headers)이 있으면 그것을 쓰고, 없으면 첫 행(헤더일 때) 또는 번호를 쓴다.
+    """
+    if not table:
+        return [], [], False
+    known = [normalize_header(k) for k in (known_headers or [])]
+    is_header = looks_like_header(table, known, spec.template) if spec.header_row is None else spec.header_row
+    width = len(table[0])
+    if any(known):
+        headers = (known + [""] * width)[:width]
+    elif is_header:
+        headers = [normalize_header(h) for h in table[0]]
+    else:
+        headers = [str(i + 1) for i in range(width)]
+    data = table[1:] if is_header else table
+    if spec.skip_blank_rows:
+        data = [r for r in data if any(c.strip() for c in r)]
+    return headers, data, is_header
 
 
 # ---------------------------------------------------------------- 템플릿
@@ -308,12 +367,12 @@ def split_template(template: str) -> tuple[str, str, str]:
 
 # ---------------------------------------------------------------- 렌더링
 
-def render(table: Table, spec: FormatSpec) -> str:
+def render(table: Table, spec: FormatSpec, known_headers: list[str] | None = None) -> str:
     """템플릿을 표에 적용한 텍스트. 템플릿 오류는 TemplateError.
 
     { } 가 든 줄들은 행마다 반복되어 줄바꿈으로 이어지고, 그 앞뒤 줄(머리말·꼬리말)은 한 번만 나온다.
     """
-    headers, data = split_table(table, spec.header_row, spec.skip_blank_rows)
+    headers, data, _ = resolve_table(table, spec, known_headers)
     if not headers:
         return ""
     n = len(data)
@@ -363,6 +422,9 @@ def load_presets(text: str) -> list[FormatSpec]:
 
 HELP_TEXT = """\
 { } 가 들어 있는 줄은 엑셀의 한 행마다 반복되고, 그 앞뒤 줄은 한 번만 나옵니다.
+첫 행이 열 이름(품명, 규격 …)이면 자동으로 건너뛰고, 아니면 전부 데이터로 넣습니다.
+헤더 없이 데이터만 복사해도 {품명} 같은 이름을 쓰려면, 왼쪽 "열 이름" 칸에 시트의 열 순서를
+한 번 저장해 두세요 (헤더 행을 붙여넣고 "첫 행에서 가져오기").
 
   11/5일 입고요청          ← 머리말 (한 번)
   {품명} {규격} {수량}개    ← 행마다 반복
@@ -372,8 +434,8 @@ HELP_TEXT = """\
 빈 셀은 옆의 공백 하나와 함께 사라져 공백이 두 번 생기지 않습니다.
 
 자리표시자
-  {열이름}      첫 행의 열 이름으로 참조 (예: {품명}, {수량})
-  {1} {2} …    열 번호로 참조 (헤더가 없어도 사용 가능)
+  {열이름}      열 이름으로 참조 (예: {품명}, {수량})
+  {1} {2} …    열 번호로 참조 (열 이름이 없어도 사용 가능)
   {#}          행 번호 (1부터),   {행수} 전체 행 수,   {오늘} 오늘 날짜 (11/5 형식)
   {{  }}        중괄호를 글자 그대로 넣을 때
 

@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLayout,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -38,11 +39,11 @@ MAX_PREVIEW_CELLS = 200_000  # 이보다 큰 표는 미리보기만 생략 (복�
 
 def _extra_stylesheet(t: dict[str, str]) -> str:
     return f"""
-    QPlainTextEdit, QComboBox {{
+    QPlainTextEdit, QLineEdit, QComboBox {{
         background: {t['panel']}; border: 1px solid {t['border']}; border-radius: 7px;
         padding: 6px 8px; selection-background-color: {t['accent']};
         selection-color: {t['accent_fg']}; }}
-    QPlainTextEdit:focus, QComboBox:focus {{ border: 1px solid {t['accent']}; }}
+    QPlainTextEdit:focus, QLineEdit:focus, QComboBox:focus {{ border: 1px solid {t['accent']}; }}
     QPlainTextEdit[readOnly="true"] {{ background: {t['canvas']}; }}
     QComboBox::drop-down {{ border: none; width: 22px; }}
     QComboBox QAbstractItemView {{ background: {t['panel']}; border: 1px solid {t['border']};
@@ -224,9 +225,17 @@ class MainWindow(QMainWindow):
         self.input_status = QLabel("")
         self.input_status.setObjectName("ok")
         self.input_status.setWordWrap(True)
-        self.chk_header = QCheckBox("첫 행을 열 이름으로 사용")
-        self.chk_header.setChecked(True)
-        self.chk_header.toggled.connect(self._on_spec_changed)
+        # 열 이름: 헤더 없이 데이터만 복사해도 {품명} 같은 이름을 쓸 수 있도록 한 번 저장해 둠
+        self.col_names = QLineEdit()
+        self.col_names.setPlaceholderText("비어 있으면 첫 행이 열 이름일 때만 이름으로 참조 가능")
+        self.col_names.setToolTip("시트의 열 순서대로 쉼표로 구분. 빈 열은 비워 둠 (예: 품명, 규격, , , , 재질, 수량)")
+        self.col_names.textChanged.connect(self._on_col_names_changed)
+        self.btn_grab_header = QPushButton("첫 행에서 가져오기")
+        self.btn_grab_header.setToolTip("지금 붙여넣은 내용의 첫 행을 열 이름으로 저장")
+        self.btn_grab_header.clicked.connect(self._grab_header)
+        col_row = QHBoxLayout()
+        col_row.addWidget(self.col_names, 1)
+        col_row.addWidget(self.btn_grab_header)
         self.chk_skip_blank = QCheckBox("빈 행 건너뛰기")
         self.chk_skip_blank.setChecked(True)
         self.chk_skip_blank.toggled.connect(self._on_spec_changed)
@@ -240,7 +249,8 @@ class MainWindow(QMainWindow):
         left.addWidget(self._heading("1. 엑셀에서 복사한 내용"))
         left.addWidget(self.input, 1)
         left.addWidget(self.input_status)
-        left.addWidget(self.chk_header)
+        left.addWidget(self._field("열 이름 (헤더 없이 복사할 때 사용, 한 번만 저장)"))
+        left.addLayout(col_row)
         left.addWidget(self.chk_skip_blank)
         left.addWidget(self.chk_auto)
         left_w = QWidget()
@@ -348,6 +358,7 @@ class MainWindow(QMainWindow):
     def _restore_state(self) -> None:
         s = self.settings
         self.chk_auto.setChecked(s.value("auto_paste", True, bool))
+        self.col_names.setText(s.value("column_names", "", str))
         self.chk_minimize.setChecked(s.value("minimize_after_copy", False, bool))
         geo = s.value("geometry")
         if geo:
@@ -363,7 +374,7 @@ class MainWindow(QMainWindow):
         return FormatSpec(
             name="",
             template=self.template.toPlainText(),
-            header_row=self.chk_header.isChecked(),
+            header_row=None,  # 첫 행이 열 이름인지 자동 판단
             skip_blank_rows=self.chk_skip_blank.isChecked(),
         )
 
@@ -371,7 +382,6 @@ class MainWindow(QMainWindow):
         self._loading = True
         try:
             self.template.setPlainText(spec.template)
-            self.chk_header.setChecked(spec.header_row)
             self.chk_skip_blank.setChecked(spec.skip_blank_rows)
         finally:
             self._loading = False
@@ -417,15 +427,38 @@ class MainWindow(QMainWindow):
         self.input.clear()
         self._last_imported = ""
 
+    def _known_headers(self) -> list[str]:
+        return core.parse_column_names(self.col_names.text())
+
+    def _resolve(self) -> tuple[list[str], core.Table, bool]:
+        return core.resolve_table(self.table, self._current_spec(), self._known_headers())
+
     def _on_input_changed(self) -> None:
         self.table = core.parse_table(self.input.toPlainText())
+        self.btn_grab_header.setEnabled(bool(self.table))
         self._refresh_chips()
+        self._debounce.start()
+
+    def _on_col_names_changed(self) -> None:
+        self.settings.setValue("column_names", self.col_names.text())
+        self._on_spec_changed()
+
+    def _grab_header(self) -> None:
+        if not self.table:
+            return
+        names = [core.normalize_header(c) for c in self.table[0]]
+        while names and not names[-1]:
+            names.pop()
+        self.col_names.setText(", ".join(names))
+        self.status_left.setText("첫 행을 열 이름으로 저장했습니다. 이제 데이터만 복사해도 이름으로 참조됩니다.")
+
+    def _update_input_status(self, is_header: bool, data_rows: int) -> None:
         if not self.table:
             self.input_status.setText("")
-        else:
-            rows, cols = len(self.table), len(self.table[0])
-            self.input_status.setText(f"{rows}행 × {cols}열 감지")
-        self._debounce.start()
+            return
+        rows, cols = len(self.table), len(self.table[0])
+        how = "첫 행은 열 이름으로 인식해 건너뜀" if is_header else "모든 행을 데이터로 처리"
+        self.input_status.setText(f"{rows}행 × {cols}열 감지 · {how} · 데이터 {data_rows}행")
 
     # ------------------------------------------------------------ 양식
 
@@ -437,7 +470,8 @@ class MainWindow(QMainWindow):
 
     def _refresh_chips(self) -> None:
         self.chips.clear()
-        names = core.column_names(self.table, self.chk_header.isChecked())
+        headers, _, _ = self._resolve()
+        names = core.column_names(headers)
         for name in names:
             b = QToolButton()
             b.setObjectName("chip")
@@ -469,14 +503,17 @@ class MainWindow(QMainWindow):
         if not self.table:
             self.output.setPlainText("")
             self.output_status.setText("")
+            self.input_status.setText("")
             self.btn_copy.setEnabled(False)
             return
-        headers, data = core.split_table(self.table, spec.header_row, spec.skip_blank_rows)
+        headers, data, is_header = core.resolve_table(self.table, spec, self._known_headers())
+        self._update_input_status(is_header, len(data))
         unknown = core.unknown_placeholders(spec.template, headers)
         if unknown:
-            self.template_warn.setText("알 수 없는 자리표시자: " + ", ".join("{" + u + "}" for u in unknown))
+            hint = "" if self._known_headers() or is_header else " — 헤더 없이 복사했다면 왼쪽 '열 이름'을 저장하세요"
+            self.template_warn.setText("알 수 없는 자리표시자: " + ", ".join("{" + u + "}" for u in unknown) + hint)
         try:
-            result = core.render(self.table, spec)
+            result = core.render(self.table, spec, self._known_headers())
         except core.TemplateError as e:
             self.template_warn.setText(str(e))
             self.output.setPlainText("")

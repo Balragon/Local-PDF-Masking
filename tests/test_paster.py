@@ -3,6 +3,9 @@ from datetime import date
 from excelpaster.core import (
     FormatSpec,
     column_names,
+    looks_like_header,
+    parse_column_names,
+    resolve_table,
     dump_presets,
     load_presets,
     parse_table,
@@ -56,8 +59,7 @@ def test_template_without_header_row():
     t = parse_table("홍길동\t영업\n김철수\t개발\n")
     spec = FormatSpec(template="{1}-{2}", header_row=False)
     assert render(t, spec) == "홍길동-영업\n김철수-개발"
-    assert column_names(t, False) == ["1", "2"]
-    assert column_names(parse_table(EXCEL), True) == ["이름", "부서", "금액"]
+    assert column_names(["", "x"]) == ["1", "x"]
 
 
 def test_head_body_tail_template():
@@ -152,7 +154,7 @@ REAL_ROWS = ("Xx형태\t700*350*1600\t\t\t\tSUS304\t1\t10000\t12000\t\t\tA사\t1
 def test_real_sheet_header_row():
     t = parse_table(REAL_HEADER + REAL_ROWS)
     assert len(t[0]) == 17
-    names = column_names(t, True)
+    names = column_names(resolve_table(t, FormatSpec(template="{품명}"))[0])
     assert names[:7] == ["품명", "규격", "3", "4", "5", "재질", "수량"]
     assert names[7] == "매입가" and names[13] == "입고 예정" and names[15] == "출고 예정일"
     spec = FormatSpec(template="{오늘}일 입고요청\n{품명} {규격} {재질} {수량}개\n오전입고 바랍니다.")
@@ -161,3 +163,39 @@ def test_real_sheet_header_row():
     # 셀 안 줄바꿈·공백이 든 열 이름도 여러 방식으로 참조 가능
     assert render(t, FormatSpec(template="{입고예정}|{입고 예정}|{매입가}|{출고예정일}")).splitlines()[0] == "11/5|11/5|10000|"
     assert unknown_placeholders("{입고예정} {없음}", split_table(t, True)[0]) == ["없음"]
+
+
+def test_auto_header_detection():
+    data_only = "Xx형태\t700*350*1600\tSUS304\t1\r\nAR38\t\t\t20\r\n"
+    with_header = "품명\t규격\t재질\t수량\r\n" + data_only
+    tpl = FormatSpec(template="{품명} {규격} {재질} {수량}개")
+    # 1) 템플릿에 쓴 이름이 첫 행에 있으면 헤더
+    assert looks_like_header(parse_table(with_header), [], tpl.template)
+    # 2) 데이터만 복사: 첫 행에 숫자 있음 → 데이터. 모든 행이 들어감
+    assert not looks_like_header(parse_table(data_only), [], tpl.template)
+    headers, rows, is_header = resolve_table(parse_table(data_only), tpl)
+    assert not is_header and len(rows) == 2 and headers == ["1", "2", "3", "4"]
+    # 3) 저장된 열 이름이 있으면 데이터만 복사해도 이름으로 참조
+    known = parse_column_names("품명, 규격, 재질, 수량")
+    assert render(parse_table(data_only), tpl, known) == "Xx형태 700*350*1600 SUS304 1개\nAR38 20개"
+    # 저장된 열 이름 + 헤더 포함 복사 → 헤더 건너뜀
+    assert render(parse_table(with_header), tpl, known) == "Xx형태 700*350*1600 SUS304 1개\nAR38 20개"
+    # 4) 번호 템플릿 + 헤더 있음: 첫 행엔 숫자 없고 아래엔 있음 → 헤더로 판단
+    num = FormatSpec(template="{1} {4}")
+    assert render(parse_table(with_header), num) == "Xx형태 1\nAR38 20"
+    # 숫자가 전혀 없는 명단은 전부 데이터
+    names_only = "홍길동\t영업\n김철수\t개발\n"
+    assert render(parse_table(names_only), FormatSpec(template="{1}")) == "홍길동\n김철수"
+    # 강제 지정도 그대로 동작
+    assert render(parse_table(names_only), FormatSpec(template="{1}", header_row=True)) == "김철수"
+
+
+def test_parse_column_names():
+    assert parse_column_names("품명, 규격, , , , 재질, 수량") == ["품명", "규격", "", "", "", "재질", "수량"]
+    assert parse_column_names("품명\t규격\t\t재질") == ["품명", "규격", "", "재질"]
+    assert parse_column_names("  ") == []
+    # 실제 헤더 행 17열을 저장해 두고 데이터만 복사
+    known = [c for c in parse_table(REAL_HEADER)[0]]
+    known = [" ".join(k.split()) for k in known]
+    out = render(parse_table(REAL_ROWS), FormatSpec(template="{품명} {규격} {재질} {수량}개"), known)
+    assert out == "Xx형태 700*350*1600 SUS304 1개\nAR38 20개"
