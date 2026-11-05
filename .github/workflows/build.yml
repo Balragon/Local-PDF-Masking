@@ -35,6 +35,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt pyinstaller pillow
+      # 러너 파이썬에 기본으로 깔린 certifi 등이 구버전일 수 있어 점검 전에 최신으로
+      - run: pip install --upgrade certifi setuptools
 
       - name: Audit dependencies for known vulnerabilities (pip-audit)
         shell: bash
