@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -22,6 +23,9 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSplitter,
+    QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QToolBar,
     QToolButton,
     QVBoxLayout,
@@ -35,6 +39,7 @@ from masker import theme
 APP_NAME = "Excel Paster"
 ORG_NAME = "LocalTools"
 MAX_PREVIEW_CELLS = 200_000  # 이보다 큰 표는 미리보기만 생략 (복사는 됨)
+MAX_GRID_ROWS = 500          # 왼쪽 격자 표에 보여 줄 최대 행 수
 
 
 def _extra_stylesheet(t: dict[str, str]) -> str:
@@ -45,6 +50,14 @@ def _extra_stylesheet(t: dict[str, str]) -> str:
         selection-color: {t['accent_fg']}; }}
     QPlainTextEdit:focus, QLineEdit:focus, QComboBox:focus {{ border: 1px solid {t['accent']}; }}
     QPlainTextEdit[readOnly="true"] {{ background: {t['canvas']}; }}
+    QTableWidget {{ background: {t['panel']}; border: 1px solid {t['border']}; border-radius: 7px;
+        gridline-color: {t['border']}; selection-background-color: {t['selected']};
+        selection-color: {t['text']}; outline: none; }}
+    QHeaderView::section {{ background: {t['bg']}; color: {t['muted']}; border: none;
+        border-right: 1px solid {t['border']}; border-bottom: 1px solid {t['border']};
+        padding: 4px 6px; font-weight: 600; }}
+    QTableCornerButton::section {{ background: {t['bg']}; border: none; }}
+    QFrame#dropzone:hover {{ border-color: {t['accent']}; }}
     QComboBox::drop-down {{ border: none; width: 22px; }}
     QComboBox QAbstractItemView {{ background: {t['panel']}; border: 1px solid {t['border']};
         selection-background-color: {t['selected']}; selection-color: {t['text']}; outline: none; }}
@@ -145,7 +158,7 @@ class MainWindow(QMainWindow):
         QGuiApplication.styleHints().colorSchemeChanged.connect(lambda _: self._apply_theme())
         self._restore_state()
         self._reload_preset_combo()
-        self.input.setFocus()
+        self.paste_hint.setFocus()
 
     # ------------------------------------------------------------ UI
 
@@ -215,13 +228,39 @@ class MainWindow(QMainWindow):
         m.addAction(self.act_help)
 
     def _build_ui(self) -> None:
-        # 1. 입력
-        self.input = QPlainTextEdit()
-        self.input.setFont(self._mono())
-        self.input.setPlaceholderText("엑셀에서 셀 범위를 복사한 뒤 여기에 Ctrl+V 로 붙여넣으세요.\n"
-                                      "창이 활성화될 때 클립보드를 자동으로 가져오는 옵션도 있습니다.")
-        self.input.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.input.textChanged.connect(self._on_input_changed)
+        # 1. 입력: 복사한 내용을 엑셀처럼 격자 표로 보여 준다 (붙여넣기는 Ctrl+V 또는 안내 화면 클릭)
+        self._raw = ""
+        self.grid = QTableWidget()
+        self.grid.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.grid.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.grid.setAlternatingRowColors(False)
+        self.grid.setWordWrap(False)
+        self.grid.verticalHeader().setDefaultSectionSize(24)
+        self.grid.horizontalHeader().setHighlightSections(False)
+        self.grid.horizontalHeader().setStretchLastSection(False)
+        self.grid.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.grid.installEventFilter(self)
+
+        self.paste_hint = QFrame()
+        self.paste_hint.setObjectName("dropzone")
+        self.paste_hint.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.paste_hint.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.paste_hint.installEventFilter(self)
+        hint_lay = QVBoxLayout(self.paste_hint)
+        hint_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint_title = QLabel("엑셀에서 복사한 뒤 Ctrl+V")
+        hint_title.setObjectName("welcomeTitle")
+        hint_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint_sub = QLabel("또는 이 칸을 클릭하면 클립보드 내용을 가져옵니다.\n"
+                          "창이 활성화될 때 자동으로 가져오는 옵션이 기본으로 켜져 있습니다.")
+        hint_sub.setObjectName("hint")
+        hint_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint_lay.addWidget(hint_title)
+        hint_lay.addWidget(hint_sub)
+
+        self.input = QStackedWidget()
+        self.input.addWidget(self.paste_hint)
+        self.input.addWidget(self.grid)
         self.input_status = QLabel("")
         self.input_status.setObjectName("ok")
         self.input_status.setWordWrap(True)
@@ -421,11 +460,51 @@ class MainWindow(QMainWindow):
 
     def _set_input(self, text: str) -> None:
         self._last_imported = text
-        self.input.setPlainText(text)
+        self._raw = text
+        self._on_input_changed()
 
     def _clear_input(self) -> None:
-        self.input.clear()
+        self._raw = ""
         self._last_imported = ""
+        self._on_input_changed()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        # 격자 표나 안내 화면에서 Ctrl+V → 클립보드 가져오기, 안내 화면 클릭도 같은 동작
+        if obj in (self.grid, self.paste_hint):
+            if event.type() == QEvent.Type.KeyPress and event.matches(QKeySequence.StandardKey.Paste):
+                self._paste_clipboard()
+                return True
+            if obj is self.paste_hint and event.type() == QEvent.Type.MouseButtonRelease:
+                self._paste_clipboard()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _fill_grid(self, headers: list[str], data: core.Table, is_header: bool) -> None:
+        """복사한 내용을 격자 표로. 열 머리글은 인식된 열 이름(없으면 번호)."""
+        if not self.table:
+            self.input.setCurrentWidget(self.paste_hint)
+            self.grid.clear()
+            self.grid.setRowCount(0)
+            self.grid.setColumnCount(0)
+            return
+        self.input.setCurrentWidget(self.grid)
+        rows = data[:MAX_GRID_ROWS]
+        self.grid.setUpdatesEnabled(False)
+        try:
+            self.grid.clear()
+            self.grid.setColumnCount(len(headers))
+            self.grid.setHorizontalHeaderLabels(core.column_names(headers))
+            self.grid.setRowCount(len(rows))
+            for r, row in enumerate(rows):
+                for c, val in enumerate(row):
+                    item = QTableWidgetItem(val.replace("\r\n", " ⏎ ").replace("\n", " ⏎ "))
+                    item.setToolTip(val) if ("\n" in val or len(val) > 40) else None
+                    self.grid.setItem(r, c, item)
+            self.grid.resizeColumnsToContents()
+            for c in range(len(headers)):
+                self.grid.setColumnWidth(c, min(max(self.grid.columnWidth(c), 48), 260))
+        finally:
+            self.grid.setUpdatesEnabled(True)
 
     def _known_headers(self) -> list[str]:
         return core.parse_column_names(self.col_names.text())
@@ -434,7 +513,7 @@ class MainWindow(QMainWindow):
         return core.resolve_table(self.table, self._current_spec(), self._known_headers())
 
     def _on_input_changed(self) -> None:
-        self.table = core.parse_table(self.input.toPlainText())
+        self.table = core.parse_table(self._raw)
         self.btn_grab_header.setEnabled(bool(self.table))
         self._refresh_chips()
         self._debounce.start()
@@ -458,7 +537,8 @@ class MainWindow(QMainWindow):
             return
         rows, cols = len(self.table), len(self.table[0])
         how = "첫 행은 열 이름으로 인식해 건너뜀" if is_header else "모든 행을 데이터로 처리"
-        self.input_status.setText(f"{rows}행 × {cols}열 감지 · {how} · 데이터 {data_rows}행")
+        more = f" (표에는 {MAX_GRID_ROWS}행까지만 표시)" if data_rows > MAX_GRID_ROWS else ""
+        self.input_status.setText(f"{rows}행 × {cols}열 감지 · {how} · 데이터 {data_rows}행{more}")
 
     # ------------------------------------------------------------ 양식
 
@@ -504,10 +584,12 @@ class MainWindow(QMainWindow):
             self.output.setPlainText("")
             self.output_status.setText("")
             self.input_status.setText("")
+            self._fill_grid([], [], False)
             self.btn_copy.setEnabled(False)
             return
         headers, data, is_header = core.resolve_table(self.table, spec, self._known_headers())
         self._update_input_status(is_header, len(data))
+        self._fill_grid(headers, data, is_header)
         unknown = core.unknown_placeholders(spec.template, headers)
         if unknown:
             hint = "" if self._known_headers() or is_header else " — 헤더 없이 복사했다면 왼쪽 '열 이름'을 저장하세요"
