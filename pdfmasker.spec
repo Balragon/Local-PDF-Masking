@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_all
+
 APP_NAME = "PDF Masker"
 ROOT = Path(SPECPATH)
 icon = None
@@ -11,11 +13,24 @@ if sys.platform == "win32":
 elif sys.platform == "darwin" and (ROOT / "masker" / "assets" / "icon.icns").exists():
     icon = str(ROOT / "masker" / "assets" / "icon.icns")
 
+# OS 내장 OCR 바인딩은 동적으로 불러오므로 PyInstaller 가 놓친다 → 명시적으로 수집
+extra_datas, extra_binaries, extra_hidden = [], [], []
+ocr_packages = {"win32": ["winrt"], "darwin": ["Vision", "Quartz", "Foundation", "objc"]}.get(sys.platform, [])
+for pkg in ocr_packages:
+    try:
+        d, b, h = collect_all(pkg)
+        extra_datas += d
+        extra_binaries += b
+        extra_hidden += h
+    except Exception as exc:  # noqa: BLE001
+        print(f"warning: could not collect {pkg}: {exc}")
+
 a = Analysis(
     ["main.py"],
     pathex=[str(ROOT)],
-    datas=[(str(ROOT / "masker" / "assets" / "icon.png"), "masker/assets")],
-    hiddenimports=[],
+    binaries=extra_binaries,
+    datas=[(str(ROOT / "masker" / "assets" / "icon.png"), "masker/assets")] + extra_datas,
+    hiddenimports=extra_hidden,
     excludes=["PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtPdf",
               "PySide6.QtQml", "PySide6.QtQuick", "PySide6.Qt3DCore", "PySide6.QtMultimedia",
               "pymupdf4llm", "pymupdf_layout", "tkinter"],
