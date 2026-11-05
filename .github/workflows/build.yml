@@ -56,32 +56,37 @@ jobs:
           pyinstaller --noconfirm --clean pdfmasker.spec
           pyinstaller --noconfirm --clean excelpaster.spec
 
+      # 앱마다 폴더를 나눠 아티팩트를 따로 올린다 (각각 받을 수 있게)
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force out | Out-Null
-          Copy-Item "dist/PDF Masker.exe" "out/PDF-Masker-windows.exe"
-          Copy-Item "dist/Excel Paster.exe" "out/Excel-Paster-windows.exe"
+          New-Item -ItemType Directory -Force out/pdfmasker, out/excelpaster | Out-Null
+          Copy-Item "dist/PDF Masker.exe" "out/pdfmasker/PDF-Masker-windows.exe"
+          Copy-Item "dist/Excel Paster.exe" "out/excelpaster/Excel-Paster-windows.exe"
           # SHA-256 체크섬: 받은 파일이 CI 가 만든 그 파일인지 확인용
-          Get-ChildItem out/*.exe | ForEach-Object {
-            "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
-          } | Set-Content -Encoding ascii out/SHA256SUMS-windows.txt
+          foreach ($dir in "out/pdfmasker", "out/excelpaster") {
+            Get-ChildItem "$dir/*.exe" | ForEach-Object {
+              "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+            } | Set-Content -Encoding ascii "$dir/SHA256SUMS.txt"
+          }
 
       - name: Package (macOS .dmg)
         if: runner.os == 'macOS'
         run: |
-          mkdir -p out dmgroot
+          mkdir -p out/pdfmasker out/excelpaster
           # 서명 인증서가 없으므로 ad-hoc 서명 (Gatekeeper 경고는 README 참고)
-          for app in "PDF Masker" "Excel Paster"; do
-            codesign --force --deep --sign - "dist/$app.app"
+          package() {  # $1 앱 이름, $2 출력 폴더
+            codesign --force --deep --sign - "dist/$1.app"
             rm -rf dmgroot && mkdir dmgroot
-            cp -R "dist/$app.app" dmgroot/
+            cp -R "dist/$1.app" dmgroot/
             ln -s /Applications dmgroot/Applications
-            hdiutil create -volname "$app" -srcfolder dmgroot -ov -format UDZO \
-              "out/${app// /-}-${{ matrix.name }}.dmg"
-          done
-          (cd out && shasum -a 256 *.dmg > "SHA256SUMS-${{ matrix.name }}.txt")
+            hdiutil create -volname "$1" -srcfolder dmgroot -ov -format UDZO \
+              "$2/${1// /-}-${{ matrix.name }}.dmg"
+            (cd "$2" && shasum -a 256 *.dmg > SHA256SUMS.txt)
+          }
+          package "PDF Masker" out/pdfmasker
+          package "Excel Paster" out/excelpaster
 
       - name: Report sizes and checksums
         shell: bash
@@ -91,20 +96,25 @@ jobs:
             echo
             echo '| 파일 | 크기 |'
             echo '| --- | --- |'
-            for f in out/*.exe out/*.dmg; do
+            for f in out/*/*.exe out/*/*.dmg; do
               [ -e "$f" ] || continue
               echo "| $(basename "$f") | $(du -h "$f" | cut -f1) |"
             done
             echo
             echo '```'
-            cat out/SHA256SUMS-*.txt
+            cat out/*/SHA256SUMS.txt
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: apps-${{ matrix.name }}
-          path: out/*
+          name: PDF-Masker-${{ matrix.name }}
+          path: out/pdfmasker/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Excel-Paster-${{ matrix.name }}
+          path: out/excelpaster/*
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -116,6 +126,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      - name: Merge checksums
+        run: cat artifacts/*/SHA256SUMS.txt > SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          files: |
+            artifacts/**/*.exe
+            artifacts/**/*.dmg
+            SHA256SUMS.txt

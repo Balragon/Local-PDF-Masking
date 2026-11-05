@@ -20,8 +20,9 @@ PDF에서 가릴 부분을 드래그로 지정하거나 자동으로 찾아, **�
 
 ## 다운로드 / 설치
 
-GitHub Actions가 자동으로 빌드합니다. 저장소의 **Actions** 탭 → 최근 실행 → **Artifacts** 에서 받거나,
-`v1.0.0` 같은 태그를 푸시하면 **Releases** 에 올라갑니다.
+GitHub Actions가 자동으로 빌드합니다. 저장소의 **Actions** 탭 → 최근 실행 → **Artifacts** 에서 앱별로 따로 받거나
+(`PDF-Masker-windows`, `Excel-Paster-windows`, macOS 는 `-macos-arm64`), `v1.0.0` 같은 태그를 푸시하면 **Releases** 에 올라갑니다.
+각 zip 에는 실행 파일과 `SHA256SUMS.txt` 가 들어 있습니다.
 
 | 파일 | 대상 |
 | --- | --- |
