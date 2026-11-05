@@ -183,7 +183,7 @@ AR38 20개
 **도움말 → 업데이트 확인…** 으로 직접 확인할 수 있고, **시작할 때 업데이트 확인** 을 끄면 시작 시 인터넷에 접속하지 않습니다.
 확인 과정에서 보내는 것은 버전 조회 요청뿐이며, 붙여넣은 내용은 어디에도 전송되지 않습니다.
 
-새 버전을 내려면 `excelpaster/_version.py` 의 버전을 올리고 같은 번호의 태그(`v1.1.0`)를 푸시하면 CI 가 Releases 에 올립니다.
+새 버전을 내려면 `excelpaster/_version.py` 의 버전을 올려 main 에 병합한 뒤, **Actions → Build desktop apps → Run workflow** 에서 `release_tag` 에 같은 번호(`v1.1.0`)를 입력하면 CI 가 태그와 Releases 를 만듭니다. 같은 번호의 태그를 푸시해도 됩니다.
 
 ## 저장된 템플릿
 
